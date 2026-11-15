@@ -41,7 +41,7 @@ AutoCAD 插件：选中一批闭合图形块 → 提取轮廓 → 归并计数 �
 
 ```
 cad-nesting/
-├── build.cmd                          编译脚本（输出带时间戳，绕开 dll 被 CAD 锁住）
+├── build.cmd / build.ps1              编译脚本（自动识别 CAD 路径，输出带时间戳绕开 dll 锁）
 ├── CadNesting.bundle/                 插件清单（自动加载用）
 ├── src/
 │   ├── Nesting.Core/                  纯 .NET 类库，无 AutoCAD 依赖，可单元测试
@@ -64,6 +64,9 @@ cad-nesting/
 └── tests/SmokeTest/                   不依赖 AutoCAD 的冒烟测试
 ```
 
+编译产物（`bin/` `obj/` `build/` `dist/`、`CadNesting.bundle/Contents/Windows/*.dll`）和本机路径配置
+（`AcadDir.local.props`）都不进仓库，见 `.gitignore`。
+
 ## 环境（已实测确认）
 
 | 项 | 值 |
@@ -79,19 +82,36 @@ cad-nesting/
 ## 编译
 
 ```cmd
+git clone git@github.com:maroon5mlh/cadneting.git
+cd cadneting
+
 build.cmd
 ```
 
-输出到 `build\<时间戳>\`，并打印需要 NETLOAD 的完整路径。
+`build.cmd` 会自动从注册表识别 AutoCAD 安装目录（也支持 `ACAD_DIR` 环境变量），
+输出到 `build\<时间戳>\`，打印需要 NETLOAD 的完整路径，并把两个 dll 同步进 `CadNesting.bundle\Contents\Windows\`。
 
 **为什么要带时间戳**：NETLOAD 过的 dll 会被 AutoCAD 进程锁住直到关闭 CAD，
 直接覆盖 `dist\` 会报 `MSB3021 文件被占用`。每次输出到新目录就不用等解锁。
 
-指定其他 AutoCAD 版本：
+自动识别失败（多版本共存、绿色安装、装在其他盘）时，任选一种方式指定：
 
 ```cmd
+:: 方式一：命令行传参
 build.cmd "C:\Program Files\Autodesk\AutoCAD 2026"
+
+:: 方式二：本机配置文件（已被 .gitignore 排除，不会进仓库）
+::   新建 src\Nesting.AutoCAD\AcadDir.local.props，内容：
+::   <Project><PropertyGroup><AcadDir>D:\CAD2017\AutoCAD 2027</AcadDir></PropertyGroup></Project>
+
+:: 方式三：环境变量
+set ACAD_DIR=D:\CAD2017\AutoCAD 2027 && build.cmd
+
+:: 方式四：直接用 dotnet（需方式二或三已配置）
+dotnet build src/Nesting.AutoCAD/Nesting.AutoCAD.csproj -c Release -p:AcadDir="你的AutoCAD目录"
 ```
+
+找不到 `acmgd.dll` 时构建会直接报一句人话，而不是抛一串 HintPath 警告。
 
 ## 冒烟测试（不需要 AutoCAD）
 
