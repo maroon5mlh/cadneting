@@ -1,0 +1,33 @@
+# ---------- 编译产物 ----------
+[Bb]in/
+[Oo]bj/
+dist/
+build/
+
+# ---------- 插件包内的二进制（由 build 脚本生成后复制） ----------
+CadNesting.bundle/Contents/Windows/*.dll
+
+# ---------- Visual Studio / Rider ----------
+.vs/
+.idea/
+*.suo
+*.user
+*.userprefs
+*.DotSettings.user
+
+# ---------- NuGet ----------
+*.nupkg
+packages/
+
+# ---------- 本机配置文件（含个人 CAD 安装路径，不入库） ----------
+AcadDir.local.props
+
+# ---------- 系统 ----------
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---------- 调试临时文件 ----------
+*.pdb
+*.log
+*.tmp

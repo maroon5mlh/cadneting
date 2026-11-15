@@ -1,0 +1,59 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- 本机 CAD 安装路径覆盖（该文件已被 .gitignore 排除，不会进仓库） -->
+  <Import Project="AcadDir.local.props" Condition="Exists('AcadDir.local.props')" />
+
+  <PropertyGroup>
+    <!-- AutoCAD 2027 = R26.0 + .NET 10（acdbmgd.runtimeconfig.json 已确认 tfm=net10.0） -->
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <LangVersion>10.0</LangVersion>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <AssemblyName>Nesting.AutoCAD</AssemblyName>
+    <RootNamespace>Nesting.AutoCAD</RootNamespace>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <UseWindowsForms>true</UseWindowsForms>
+    <!--
+      AutoCAD 安装目录解析顺序：
+        1. -p:AcadDir="..." 命令行传入
+        2. 环境变量 ACAD_DIR
+        3. src/Nesting.AutoCAD/AcadDir.local.props（本机配置，不入库）
+        4. 下面的标准安装路径
+    -->
+    <AcadDir Condition="'$(AcadDir)' == ''">$(ACAD_DIR)</AcadDir>
+    <AcadDir Condition="'$(AcadDir)' == ''">C:\Program Files\Autodesk\AutoCAD 2027</AcadDir>
+    <OutputPath>..\..\dist\</OutputPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.WindowsDesktop.App.WPF" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="acmgd">
+      <HintPath>$(AcadDir)\acmgd.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="acdbmgd">
+      <HintPath>$(AcadDir)\acdbmgd.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="accoremgd">
+      <HintPath>$(AcadDir)\accoremgd.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Nesting.Core\Nesting.Core.csproj" />
+  </ItemGroup>
+
+  <!-- 找不到 CAD 程序集时给一句人话，而不是让 MSBuild 抛一串 HintPath 警告 -->
+  <Target Name="CheckAcadDir" BeforeTargets="ResolveAssemblyReferences">
+    <Error Condition="!Exists('$(AcadDir)\acmgd.dll')"
+           Text="找不到 AutoCAD 程序集：$(AcadDir)\acmgd.dll&#10;请用 -p:AcadDir=&quot;你的AutoCAD安装目录&quot; 指定，或在 src/Nesting.AutoCAD/AcadDir.local.props 里配置。" />
+  </Target>
+
+</Project>

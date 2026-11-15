@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ApplicationPackage
+    SchemaVersion="1.0"
+    AutodeskProduct="AutoCAD"
+    Name="CAD Nesting"
+    Description="钣金激光切割自动排样（块级共边排版）"
+    AppVersion="0.1.0"
+    ProductType="Application"
+    ProductCode="{8F3A2C41-7B6E-4D92-9E15-2A7C4B1D6E30}"
+    UpgradeCode="{C1D4E7A2-3B58-4F60-8A9D-5E2B7C1F4A83}"
+    Version="0.1.0"
+    Author="Internal">
+
+  <CompanyDetails Name="Internal" />
+
+  <Components Description="AutoCAD 2027 (R26.0 / .NET 10)">
+    <RuntimeRequirements
+        OS="Win64"
+        Platform="AutoCAD*"
+        SeriesMin="R26.0"
+        SeriesMax="R26.0" />
+
+    <ComponentEntry
+        AppName="CADNesting"
+        Version="0.1.0"
+        ModuleName="./Contents/Windows/Nesting.AutoCAD.dll"
+        AppDescription="块级共边排样"
+        LoadOnAutoCADStartup="False">
+      <Commands GroupName="NEST">
+        <Command Global="NESTEXTRACT" Local="NESTEXTRACT" />
+        <Command Global="NESTAPPLY"   Local="NESTAPPLY" />
+      </Commands>
+    </ComponentEntry>
+  </Components>
+
+</ApplicationPackage>
