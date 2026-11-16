@@ -157,8 +157,11 @@ namespace Nesting.Core
 
     public sealed class NestSettings
     {
-        /// <summary>零件间距（mm）。0 表示严格共边；建议激光薄板取 0~0.2</summary>
-        public double SpacingMm = 0.2;
+        /// <summary>
+        /// 零件间距（mm）。默认 0 = 严格共边。
+        /// 这批件是块级共边排版，留间距纯属浪费；只有割缝补偿或热变形需要时才调大。
+        /// </summary>
+        public double SpacingMm = 0;
 
         /// <summary>
         /// 留边（mm）：零件包围盒到板四边的距离，默认 5。
@@ -167,8 +170,12 @@ namespace Nesting.Core
         /// </summary>
         public double MarginMm = 5;
 
-        /// <summary>全局是否允许 90 度旋转（单件可通过 PartType.AllowRotate90 单独关闭）</summary>
-        public bool AllowRotate90 = true;
+        /// <summary>
+        /// 全局是否允许 90 度旋转（单件可通过 PartType.AllowRotate90 单独关闭）。
+        /// 默认关闭：有纹向/折弯方向的件转了就是废料，宁可少几个点利用率。
+        /// 命中 RotateKeywords 的件会绕过这个开关。
+        /// </summary>
+        public bool AllowRotate90 = false;
 
         /// <summary>
         /// 块名命中这些关键字的零件强制允许 90° 旋转，**不受 AllowRotate90 全局开关影响**。

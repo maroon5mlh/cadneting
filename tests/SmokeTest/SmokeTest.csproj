@@ -14,4 +14,12 @@
     <ProjectReference Include="..\..\src\Nesting.Core\Nesting.Core.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!--
+      面板参数持久化只依赖 System.*，不含 AutoCAD API，因此以源码链接方式
+      编进测试工程直接验证。否则这段"存盘失败也不报错"的逻辑只能靠人肉点面板试。
+    -->
+    <Compile Include="..\..\src\Nesting.AutoCAD\UI\PanelSettings.cs" Link="Linked\PanelSettings.cs" />
+  </ItemGroup>
+
 </Project>

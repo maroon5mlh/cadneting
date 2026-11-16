@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Globalization;
 using System.Windows.Forms;
 using Nesting.Core;
 
@@ -27,6 +28,12 @@ namespace Nesting.AutoCAD.UI
         public Label StatusLabel;
 
         private ToolTip _tip;
+
+        /// <summary>装载/恢复配置期间为 true，避免控件的 Changed 事件把半成品存盘</summary>
+        private bool _loading;
+
+        /// <summary>板材表格所在行的样式，行数变化时需要改它的高度</summary>
+        private RowStyle _sheetRowStyle;
 
         public NestPaletteControl()
         {
@@ -85,9 +92,12 @@ namespace Nesting.AutoCAD.UI
             colH.DefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleRight;
 
             SheetGrid.Columns.AddRange(colUse, colName, colW, colH);
-            SheetGrid.Rows.Add(true, "1220x2440", "1220", "2440");
-            SheetGrid.Rows.Add(true, "1220x3050", "1220", "3050");
-            SheetGrid.Height = 96;
+
+            // 常用规格先摆三行，实际内容在构造末尾由 PanelSettings 恢复
+            // （用户改过的规格会被原样读回，包括增删的条目）
+            foreach (PanelSheetRow r in PanelSettings.CreateDefault().Sheets)
+                SheetGrid.Rows.Add(r.Use, r.Name, PanelSettings.Num(r.W), PanelSettings.Num(r.H));
+
 
             var sheetBtnRow = new FlowLayoutPanel
             {
@@ -144,7 +154,7 @@ namespace Nesting.AutoCAD.UI
                 Minimum = 0,
                 Maximum = 50,
                 Increment = 0.1M,
-                Value = 0.2M,
+                Value = 0M,          // 默认零：这批件走共边，间距会白白吃掉利用率
                 Width = 58,
                 Margin = new Padding(0, 5, 3, 0)
             };
@@ -192,7 +202,7 @@ namespace Nesting.AutoCAD.UI
             RotateCheck = new CheckBox
             {
                 Text = "允许旋转 90°",
-                Checked = true,
+                Checked = false,     // 默认不转：有纹向/折弯方向要求时乱转是废料
                 AutoSize = true,
                 Margin = new Padding(0, 6, 0, 0)
             };
@@ -289,7 +299,8 @@ namespace Nesting.AutoCAD.UI
             root.Controls.Add(StatusLabel, 0, 8);
 
             root.RowStyles.Add(new RowStyle(SizeType.AutoSize));      // 0 title
-            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 104)); // 1 sheet grid
+            _sheetRowStyle = new RowStyle(SizeType.Absolute, 104);    // 1 sheet grid（行数变了要跟着调）
+            root.RowStyles.Add(_sheetRowStyle);
             root.RowStyles.Add(new RowStyle(SizeType.AutoSize));      // 2 buttons
             root.RowStyles.Add(new RowStyle(SizeType.AutoSize));      // 3 title
             root.RowStyles.Add(new RowStyle(SizeType.AutoSize));      // 4 params
@@ -299,7 +310,142 @@ namespace Nesting.AutoCAD.UI
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));  // 8 status
 
             Controls.Add(root);
+
+            UpdateSheetGridHeight();
+            HookPersistence();
+            LoadSettings();
+
             ResumeLayout(true);
+        }
+
+        /// <summary>
+        /// 板材表格高度跟随行数。第 1 行是 Absolute 定高，不跟着改的话
+        /// 加了几行就会被裁掉，而面板看起来"就是少一行"，很容易误判成数据没存上。
+        /// </summary>
+        private void UpdateSheetGridHeight()
+        {
+            int rows = 0;
+            foreach (DataGridViewRow r in SheetGrid.Rows) if (!r.IsNewRow) rows++;
+            int h = 30 + rows * 23;                 // 表头 + 每行约 23px
+            if (h < 70) h = 70;
+            if (h > 240) h = 240;                   // 再高就挤掉结果区，改为滚动
+            if (_sheetRowStyle != null) _sheetRowStyle.Height = h;
+            SheetGrid.Height = h;
+        }
+
+        // ------------------------------------------------------------------
+        // 参数持久化
+        // ------------------------------------------------------------------
+
+        private void HookPersistence()
+        {
+            SpacingBox.ValueChanged += OnAnySettingChanged;
+            MarginBox.ValueChanged += OnAnySettingChanged;
+            RotateCheck.CheckedChanged += OnAnySettingChanged;
+            FollowText.CheckedChanged += OnAnySettingChanged;
+            KeywordBox.Leave += OnAnySettingChanged;
+
+            // 勾选框必须显式提交，否则 CellValueChanged 要等离开单元格才触发，
+            // 用户勾完直接关 CAD 就会丢
+            SheetGrid.CurrentCellDirtyStateChanged += (s, e) =>
+            {
+                if (SheetGrid.IsCurrentCellDirty)
+                    SheetGrid.CommitEdit(DataGridViewDataErrorContexts.Commit);
+            };
+            SheetGrid.CellValueChanged += OnAnySettingChanged;
+            SheetGrid.CellEndEdit += OnAnySettingChanged;
+            SheetGrid.RowsAdded += (s, e) => { UpdateSheetGridHeight(); SaveSettings(); };
+            SheetGrid.RowsRemoved += (s, e) => { UpdateSheetGridHeight(); SaveSettings(); };
+        }
+
+        private void OnAnySettingChanged(object sender, EventArgs e)
+        {
+            SaveSettings();
+        }
+
+        /// <summary>把面板当前状态写盘。失败静默（原因在 PanelSettings.LastError，NESTDIAG 可查）</summary>
+        public void SaveSettings()
+        {
+            if (_loading) return;
+            CollectSettings().Save();
+        }
+
+        /// <summary>面板 → 配置对象</summary>
+        public PanelSettings CollectSettings()
+        {
+            var st = new PanelSettings
+            {
+                SpacingMm = (double)SpacingBox.Value,
+                MarginMm = (double)MarginBox.Value,
+                AllowRotate90 = RotateCheck.Checked,
+                FollowText = FollowText.Checked,
+                Keywords = KeywordBox.Text ?? ""
+            };
+
+            foreach (DataGridViewRow row in SheetGrid.Rows)
+            {
+                if (row.IsNewRow) continue;
+
+                object use = row.Cells["Use"].Value;
+                string name = Convert.ToString(row.Cells["Name"].Value) ?? "";
+                double w, h;
+                double.TryParse(Convert.ToString(row.Cells["W"].Value),
+                                NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out w);
+                double.TryParse(Convert.ToString(row.Cells["H"].Value),
+                                NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out h);
+
+                st.Sheets.Add(new PanelSheetRow
+                {
+                    Use = use != null && Convert.ToBoolean(use),
+                    Name = name,
+                    W = w,
+                    H = h
+                });
+            }
+            return st;
+        }
+
+        /// <summary>配置对象 → 面板。文件不存在或损坏时保持面板默认值</summary>
+        private void LoadSettings()
+        {
+            PanelSettings saved = PanelSettings.TryLoad();
+            if (saved == null) return;
+
+            _loading = true;
+            try
+            {
+                if (saved.Sheets != null && saved.Sheets.Count > 0)
+                {
+                    SheetGrid.Rows.Clear();
+                    foreach (PanelSheetRow r in saved.Sheets)
+                    {
+                        if (r.W <= 0 || r.H <= 0) continue;   // 坏行直接丢，别让面板出现 0 宽板
+                        SheetGrid.Rows.Add(r.Use, r.Name,
+                                           PanelSettings.Num(r.W), PanelSettings.Num(r.H));
+                    }
+                    UpdateSheetGridHeight();
+                }
+
+                SpacingBox.Value = Clamp(SpacingBox, saved.SpacingMm);
+                MarginBox.Value = Clamp(MarginBox, saved.MarginMm);
+                RotateCheck.Checked = saved.AllowRotate90;
+                FollowText.Checked = saved.FollowText;
+
+                if (!string.IsNullOrWhiteSpace(saved.Keywords)) KeywordBox.Text = saved.Keywords;
+            }
+            finally
+            {
+                _loading = false;
+            }
+        }
+
+        /// <summary>把配置值夹到 NumericUpDown 的合法区间，越界会抛 ArgumentOutOfRange</summary>
+        private static decimal Clamp(NumericUpDown box, double v)
+        {
+            double x = double.IsNaN(v) || double.IsInfinity(v) ? (double)box.Minimum : v;
+            if (x < (double)box.Minimum) x = (double)box.Minimum;
+            if (x > (double)box.Maximum) x = (double)box.Maximum;
+            return (decimal)x;
         }
 
         private static Label MakeSectionLabel(string text)
@@ -369,8 +515,12 @@ namespace Nesting.AutoCAD.UI
 
                 string name = Convert.ToString(row.Cells["Name"].Value) ?? "板材";
                 double w, h;
-                if (!double.TryParse(Convert.ToString(row.Cells["W"].Value), out w)) continue;
-                if (!double.TryParse(Convert.ToString(row.Cells["H"].Value), out h)) continue;
+                // 固定用 InvariantCulture 解析：面板写入的是 "1220.5"，
+                // 跟随区域设置解析时，逗号小数点区域会把 1220,5 解析成 12205
+                if (!double.TryParse(Convert.ToString(row.Cells["W"].Value),
+                                     NumberStyles.Any, CultureInfo.InvariantCulture, out w)) continue;
+                if (!double.TryParse(Convert.ToString(row.Cells["H"].Value),
+                                     NumberStyles.Any, CultureInfo.InvariantCulture, out h)) continue;
                 if (w <= 0 || h <= 0) continue;
 
                 list.Add(new SheetSpec { Name = name, Width = w, Height = h });

@@ -81,6 +81,7 @@ namespace Nesting.AutoCAD
                 Unit = "mm"
             };
             job.Sheets.Add(new SheetSpec { Name = "1220x2440", Width = 1220, Height = 2440 });
+            job.Sheets.Add(new SheetSpec { Name = "1220x2250", Width = 1220, Height = 2250 });
             job.Sheets.Add(new SheetSpec { Name = "1220x3050", Width = 1220, Height = 3050 });
             job.Parts = parts;
 
@@ -449,6 +450,10 @@ namespace Nesting.AutoCAD
             }
 
             ed.WriteMessage("\n面板实例：" + (NestPalette.Control == null ? "未创建" : "已创建"));
+            ed.WriteMessage("\n参数配置文件：" + UI.PanelSettings.FilePath +
+                            (System.IO.File.Exists(UI.PanelSettings.FilePath) ? "（已存在）" : "（尚未生成）"));
+            if (UI.PanelSettings.LastError != null)
+                ed.WriteMessage("\n参数读写异常：" + UI.PanelSettings.LastError);
             ed.WriteMessage("\n##################################");
         }
 

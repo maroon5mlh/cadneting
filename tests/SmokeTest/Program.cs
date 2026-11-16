@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
+using Nesting.AutoCAD.UI;
 using Nesting.Core;
 using Nesting.Core.Solvers;
 
@@ -38,6 +39,7 @@ namespace SmokeTest
             TestMargin();
             TestKeywordRotation();
             TestTextHandles();
+            TestPanelSettings();
 
             Console.WriteLine();
             if (_failed == 0)
@@ -333,8 +335,10 @@ namespace SmokeTest
         {
             var job = new NestJob { BatchId = "STRESS", Unit = "mm" };
             job.Sheets.Add(new SheetSpec { Name = "1220x2440", Width = 1220, Height = 2440 });
+            job.Sheets.Add(new SheetSpec { Name = "1220x2250", Width = 1220, Height = 2250 });
             job.Sheets.Add(new SheetSpec { Name = "1220x3050", Width = 1220, Height = 3050 });
-            job.Settings.SpacingMm = 0.2;
+            job.Settings.SpacingMm = 0;            // 与新默认一致：共边
+            job.Settings.AllowRotate90 = true;     // 先量"能转"时的上限
 
             var rnd = new Random(20261115);
             double[] widths = { 400, 450, 500, 564, 600, 645.4, 700, 800, 900, 1000 };
@@ -377,6 +381,25 @@ namespace SmokeTest
                                   s.Items.Count + "  利用率 " + s.Utilization.ToString("P2"));
 
             VerifyGeometry(job, r, "压测");
+
+            // ---- 同批零件、默认不旋转（面板默认状态）再跑一次，量化"不转"的代价 ----
+            job.Settings.AllowRotate90 = false;
+            NestResult r2 = NestEngine.Solve(job);
+
+            int placed2 = 0;
+            foreach (SheetResult s in r2.Sheets) placed2 += s.Items.Count;
+
+            Check("不旋转压测无错误", r2.Error == null, r2.Error ?? "");
+            Check("不旋转压测全部落位", placed2 == total, placed2 + "/" + total + " 件");
+            Check("不旋转利用率 > 65%", r2.TotalUtilization > 0.65, r2.TotalUtilization.ToString("P2"));
+
+            double delta = r.TotalUtilization - r2.TotalUtilization;
+            Console.WriteLine("    不旋转： " + r2.Sheets.Count + " 张板，利用率 " +
+                              r2.TotalUtilization.ToString("P2") +
+                              "（比可转低 " + (delta * 100).ToString("F1") + " 个点，" +
+                              "多 " + (r2.Sheets.Count - r.Sheets.Count) + " 张板）");
+
+            VerifyGeometry(job, r2, "不旋转压测");
         }
 
         /// <summary>几何校验：这是排样引擎唯一真正重要的正确性证明。
@@ -650,6 +673,65 @@ namespace SmokeTest
             {
                 _failed++;
                 Console.WriteLine("  [FAIL] " + name + "  " + detail);
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // 面板参数持久化
+        // ------------------------------------------------------------------
+        private static void TestPanelSettings()
+        {
+            Console.WriteLine("\n-- 面板参数持久化 --");
+
+            PanelSettings def = PanelSettings.CreateDefault();
+            Check("默认三种板材规格", def.Sheets.Count == 3,
+                  string.Join(" / ", def.Sheets.ConvertAll(s => s.Name)));
+            Check("默认含 1220x2250",
+                  def.Sheets.Exists(s => Math.Abs(s.W - 1220) < 1e-9 && Math.Abs(s.H - 2250) < 1e-9), "");
+            Check("默认间距为 0", Math.Abs(def.SpacingMm) < 1e-12, def.SpacingMm.ToString());
+            Check("默认不勾选旋转", !def.AllowRotate90, def.AllowRotate90 ? "true（应 false）" : "");
+
+            string dir = Path.Combine(Path.GetTempPath(), "nest-settings-test-" + Guid.NewGuid().ToString("N"));
+            string file = Path.Combine(dir, "panel-settings.json");
+            try
+            {
+                Check("配置文件不存在时返回 null", PanelSettings.TryLoadFrom(file) == null, "");
+
+                var custom = new PanelSettings
+                {
+                    SpacingMm = 0,          // 0 必须能存回来，不能被当成"未设置"
+                    MarginMm = 12.5,
+                    AllowRotate90 = false,
+                    FollowText = true,
+                    Keywords = "铰包边、中横板"
+                };
+                custom.Sheets.Add(new PanelSheetRow { Use = true, Name = "1220x2250", W = 1220, H = 2250 });
+                custom.Sheets.Add(new PanelSheetRow { Use = false, Name = "停用规格", W = 900, H = 1800 });
+
+                Check("保存成功", custom.SaveTo(file), PanelSettings.LastError ?? "");
+
+                PanelSettings back = PanelSettings.TryLoadFrom(file);
+                Check("读取成功", back != null, PanelSettings.LastError ?? "");
+                if (back != null)
+                {
+                    Check("往返：间距 0 保持不变", Math.Abs(back.SpacingMm) < 1e-12, back.SpacingMm.ToString());
+                    Check("往返：留边 12.5", Math.Abs(back.MarginMm - 12.5) < 1e-9, back.MarginMm.ToString());
+                    Check("往返：旋转开关保持 false", !back.AllowRotate90, "");
+                    Check("往返：板材条目数", back.Sheets.Count == 2, back.Sheets.Count + " 条");
+                    Check("往返：未勾选状态保留",
+                          back.Sheets.Count == 2 && !back.Sheets[1].Use,
+                          back.Sheets.Count == 2 ? back.Sheets[1].Use.ToString() : "-");
+                    Check("往返：中文关键字不乱码", back.Keywords == "铰包边、中横板", back.Keywords ?? "");
+                }
+
+                // 损坏文件必须退化成默认值，而不是抛异常把面板干掉
+                File.WriteAllText(file, "{ 这不是合法 JSON");
+                Check("损坏文件返回 null 而不是抛异常", PanelSettings.TryLoadFrom(file) == null, "");
+                Check("损坏文件记录了原因", !string.IsNullOrEmpty(PanelSettings.LastError), PanelSettings.LastError ?? "");
+            }
+            finally
+            {
+                try { if (Directory.Exists(dir)) Directory.Delete(dir, true); } catch { }
             }
         }
     }
