@@ -21,8 +21,12 @@ namespace Nesting.Core.Solvers
 
         public sealed class Options
         {
-            /// <summary>尝试的零件排序 × 插入启发式组合数上限</summary>
-            public int MaxAttempts = 12;
+            /// <summary>
+            /// 排序 × 启发式 × 规格组合 的尝试次数上限。<br/>
+            /// 默认 0 = 不限（全组合都跑一遍）。400 件的量级全跑也就几十毫秒，
+            /// 限次数只会让"张数最少"这个主目标被砍掉的组合拖累。
+            /// </summary>
+            public int MaxAttempts = 0;
         }
 
         public static NestResult Solve(NestJob job) { return Solve(job, new Options()); }
@@ -90,7 +94,7 @@ namespace Nesting.Core.Solvers
                 }
             }
 
-            // ---- 板材从大到小排好，开新板时按需选择 ----
+            // ---- 板材按面积升序：开新板时取「能装下的最小规格」，先省料再谈别的 ----
             var specs = new List<SheetSpec>(job.Sheets);
             specs.Sort((a, b) => (a.Width * a.Height).CompareTo(b.Width * b.Height));
 
@@ -113,32 +117,83 @@ namespace Nesting.Core.Solvers
                 PackHeuristic.BottomLeft
             };
 
-            List<PackBin> best = null;
-            double bestSheetArea = double.MaxValue;
-            int attempts = 0;
-
-            foreach (Comparison<PackItem> cmp in orderings)
+            // ---- 候选规格组合：混排 + 每种单一规格 ----
+            //
+            // 为什么必须跑单一规格：开新板时是逐件贪心选「能装下的最小板」。
+            // 一旦面板里同时勾了 2250 和 2440，凡是能进 2250 的件都会开 2250，
+            // 2440 永远开不出来 —— 实测 428 件会从「69 张 2440」变成「75 张 2250」，
+            // 总面积几乎一样，但主目标（张数最少）反而变差。
+            // 所以要按整体结果择优，而不是逐件贪心。
+            var specSets = new List<List<SheetSpec>>();
+            specSets.Add(new List<SheetSpec>(specs));
+            if (specs.Count > 1)
             {
-                foreach (PackHeuristic h in heuristics)
+                foreach (SheetSpec s in specs)
+                    specSets.Add(new List<SheetSpec> { s });
+            }
+
+            List<PackBin> best = null;             // 按当前目标选出的最优解
+            List<PackBin> bestByArea = null;       // 备选：板材总面积最小的解
+            double bestSheetArea = double.MaxValue;
+            double minSheetArea = double.MaxValue;
+            int attempts = 0;
+            bool overBudget = false;
+
+            // 目标口径：sheets = 张数最少（默认，少换板少上下料）；area = 总用料面积最小
+            bool preferArea = string.Equals(job.Settings.Objective, "area", StringComparison.OrdinalIgnoreCase);
+
+            foreach (List<SheetSpec> specSet in specSets)
+            {
+                if (overBudget) break;
+
+                foreach (Comparison<PackItem> cmp in orderings)
                 {
-                    if (attempts++ >= opt.MaxAttempts) break;
-                    var list = new List<PackItem>(items);
-                    list.Sort(cmp);
-                    List<PackBin> bins = Pack(list, specs, spacing, margin, h, result);
+                    if (overBudget) break;
 
-                    if (bins == null) continue;
-
-                    double area = 0;
-                    foreach (PackBin b in bins) area += b.W * b.H;
-
-                    // 评分：先比张数，再比板材总面积（同张数下用小规格板更省）
-                    if (best == null || bins.Count < best.Count ||
-                        (bins.Count == best.Count && area < bestSheetArea - 1e-6))
+                    foreach (PackHeuristic h in heuristics)
                     {
+                        if (opt.MaxAttempts > 0 && attempts >= opt.MaxAttempts) { overBudget = true; break; }
+                        attempts++;
+
+                        var list = new List<PackItem>(items);
+                        list.Sort(cmp);
+                        List<PackBin> bins = Pack(list, specSet, spacing, margin, h, result);
+
+                        if (bins == null) continue;
+
+                        double area = 0;
+                        foreach (PackBin b in bins) area += b.W * b.H;
+
+                        // 备选解：只看用料面积
+                        if (bestByArea == null || area < minSheetArea - 1e-6)
+                        {
+                            bestByArea = bins;
+                            minSheetArea = area;
+                        }
+
+                        bool better;
+                        if (preferArea)
+                            better = best == null || area < bestSheetArea - 1e-6;
+                        else
+                            better = best == null || bins.Count < best.Count ||
+                                     (bins.Count == best.Count && area < bestSheetArea - 1e-6);
+
+                        if (!better) continue;
                         best = bins;
                         bestSheetArea = area;
                     }
                 }
+            }
+
+            // 张数最少的解往往用更大规格的板，材料面积反而略多。
+            // 这个取舍不该静默发生：把另一个口径的数字也报出来，让人自己判断。
+            if (!preferArea && bestByArea != null && bestByArea != best &&
+                (bestByArea.Count != best.Count || Math.Abs(minSheetArea - bestSheetArea) > 1.0))
+            {
+                result.Warnings.Add(string.Format(
+                    "按「张数最少」选定 {0} 张，用料 {1:N3} m²；若按「省料优先」可用 {2} 张，用料 {3:N3} m²。" +
+                    "面板结果的利用率按选定方案计算。",
+                    best.Count, bestSheetArea / 1e6, bestByArea.Count, minSheetArea / 1e6));
             }
 
             if (best == null)

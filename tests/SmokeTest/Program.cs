@@ -36,6 +36,7 @@ namespace SmokeTest
             TestJsonRoundTrip();
             TestNestRealJob();
             TestNestStress();
+            TestSpecSelection();
             TestMargin();
             TestKeywordRotation();
             TestTextHandles();
@@ -376,6 +377,8 @@ namespace SmokeTest
 
             Console.WriteLine("    " + total + " 件 → " + r.Sheets.Count + " 张板，利用率 " +
                               r.TotalUtilization.ToString("P2") + "，耗时 " + r.ElapsedMs + " ms");
+            if (r.Warnings != null)
+                foreach (string w in r.Warnings) Console.WriteLine("    ! " + w);
             foreach (SheetResult s in r.Sheets)
                 Console.WriteLine("    板#" + (s.Index + 1) + " " + s.SheetName + "  件数 " +
                                   s.Items.Count + "  利用率 " + s.Utilization.ToString("P2"));
@@ -400,6 +403,69 @@ namespace SmokeTest
                               "多 " + (r2.Sheets.Count - r.Sheets.Count) + " 张板）");
 
             VerifyGeometry(job, r2, "不旋转压测");
+        }
+
+        // ------------------------------------------------------------------
+        // 规格择优：逐件贪心会一律开最小板，导致主目标（张数）反而变差
+        // ------------------------------------------------------------------
+        private static void TestSpecSelection()
+        {
+            // 1000x600 的件：2250 一板 3 件、2440 四件、3050 五件。
+            // 只跑贪心的话 2250 永远装得下，2440/3050 一辈子开不出来。
+            NestJob Build(List<SheetSpec> specs)
+            {
+                var job = new NestJob { BatchId = "SPEC", Unit = "mm" };
+                job.Sheets.AddRange(specs);
+                job.Settings.SpacingMm = 0;
+                job.Settings.AllowRotate90 = false;   // 与新默认一致
+
+                var p = new PartType
+                {
+                    Id = "P001",
+                    BlockName = "合成板1",
+                    Width = 1000,
+                    Height = 600,
+                    Quantity = 200,
+                    NetArea = 1000 * 600
+                };
+                p.Outer = Rect(0, 0, 1000, 600);
+                job.Parts.Add(p);
+                return job;
+            }
+
+            var all = new List<SheetSpec>
+            {
+                new SheetSpec { Name = "1220x2250", Width = 1220, Height = 2250 },
+                new SheetSpec { Name = "1220x2440", Width = 1220, Height = 2440 },
+                new SheetSpec { Name = "1220x3050", Width = 1220, Height = 3050 }
+            };
+
+            NestResult multi = NestEngine.Solve(Build(all));
+            NestResult only = NestEngine.Solve(Build(new List<SheetSpec> { all[0] }));
+
+            Check("规格择优：三规格比只用 1220x2250 更少张数",
+                  multi.Sheets.Count < only.Sheets.Count,
+                  multi.Sheets.Count + " 张 vs " + only.Sheets.Count + " 张");
+            Check("规格择优：三规格全部落位", CountPlaced(multi) == 200,
+                  CountPlaced(multi) + "/200 件");
+
+            // 取舍必须报出来，否则用户只看利用率会以为方案变差了
+            bool toldTradeoff = false;
+            if (multi.Warnings != null)
+                foreach (string w in multi.Warnings)
+                    if (w.Contains("省料优先")) { toldTradeoff = true; break; }
+
+            Console.WriteLine("    三规格 " + multi.Sheets.Count + " 张（" +
+                              multi.Sheets[0].SheetName + "），只用 2250 需 " +
+                              only.Sheets.Count + " 张");
+            Check("规格择优：张数与用料两个口径都报出", toldTradeoff, "");
+        }
+
+        private static int CountPlaced(NestResult r)
+        {
+            int n = 0;
+            foreach (SheetResult s in r.Sheets) n += s.Items.Count;
+            return n;
         }
 
         /// <summary>几何校验：这是排样引擎唯一真正重要的正确性证明。
