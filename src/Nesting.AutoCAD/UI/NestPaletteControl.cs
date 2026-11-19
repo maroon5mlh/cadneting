@@ -260,6 +260,10 @@ namespace Nesting.AutoCAD.UI
                                  SystemFonts.MessageBoxFont.Size + 1.5f, FontStyle.Bold)
             };
 
+            if (_tip != null)
+                _tip.SetToolTip(RunButton,
+                    "选块 → 提取 → 多方案对比 → 按推荐方案摆放。\n摆放前会在图上要求点一个插入点（第一张板左下角）。");
+
             // ---- 方案对比 ----
             // 标题行右侧塞「应用选中」，比单独占一行省 30px 高度：
             // 面板最窄 380、默认高 560，多一行就会把下方结果表挤成一条缝
@@ -281,9 +285,13 @@ namespace Nesting.AutoCAD.UI
             ApplyPlanButton = MakeSmallButton("应用选中");
             ApplyPlanButton.Enabled = false;
             ApplyPlanButton.Margin = new Padding(0, 0, 0, 0);
-
             planTitleRow.Controls.Add(planTitle, 0, 0);
             planTitleRow.Controls.Add(ApplyPlanButton, 1, 0);
+
+            // 关键交互提前说清楚：按下去之后不是立刻摆放，而是先要在图上点插入点
+            if (_tip != null)
+                _tip.SetToolTip(ApplyPlanButton,
+                    "应用后到图上点一下插入点（第一张板的左下角）。\n拖动时能看到板框预览；回车沿用上次位置，ESC 取消。");
 
             PlanGrid = new DataGridView
             {

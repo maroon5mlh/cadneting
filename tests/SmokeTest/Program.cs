@@ -42,6 +42,7 @@ namespace SmokeTest
             TestKeywordRotation();
             TestTextHandles();
             TestPanelSettings();
+            TestInsertOrigin();
 
             Console.WriteLine();
             if (_failed == 0)
@@ -855,6 +856,47 @@ namespace SmokeTest
                 _failed++;
                 Console.WriteLine("  [FAIL] " + name + "  " + detail);
             }
+        }
+
+        // ------------------------------------------------------------------
+        // 排样结果落位：插入点 → 每张板 / 每个零件的世界坐标
+        // ------------------------------------------------------------------
+        private static void TestInsertOrigin()
+        {
+            Console.WriteLine("\n-- 插入点落位 --");
+
+            var result = new NestResult();
+            result.Sheets.Add(new SheetResult { Index = 0, SheetName = "1220x2440", Width = 1220, Height = 2440 });
+            result.Sheets.Add(new SheetResult { Index = 1, SheetName = "1220x2440", Width = 1220, Height = 2440 });
+            result.Sheets.Add(new SheetResult { Index = 2, SheetName = "1220x3050", Width = 1220, Height = 3050 });
+
+            var at = new Vec2(5000, 3000);
+
+            Vec2 s0 = SheetLayout.SheetOrigin(result, 0, at);
+            Check("第一张板左下角 = 插入点", Near(s0, 5000, 3000), s0.ToString());
+
+            Vec2 s1 = SheetLayout.SheetOrigin(result, 1, at);
+            Check("第二张板向右让 板宽+间隙", Near(s1, 5000 + 1220 + 300, 3000), s1.ToString());
+
+            Vec2 s2 = SheetLayout.SheetOrigin(result, 2, at);
+            Check("第三张板累加前两张宽度", Near(s2, 5000 + 2 * (1220 + 300), 3000), s2.ToString());
+
+            // Y 方向必须跟着插入点走：只挪 X 不挪 Y 是这类改写最常见的漏
+            Vec2 part = SheetLayout.ToWorld(result, 1, at, 100, 200);
+            Check("零件 Y = 插入点 Y + 板内 Y", Near(part, 5000 + 1520 + 100, 3000 + 200), part.ToString());
+
+            // 负坐标同样合法（图纸常画在原点左上），不能把负数当无效值丢掉
+            Vec2 neg = SheetLayout.SheetOrigin(result, 0, new Vec2(-800, -600));
+            Check("负插入点原样生效", Near(neg, -800, -600), neg.ToString());
+
+            // 空结果不该抛
+            Vec2 empty = SheetLayout.SheetOrigin(null, 0, at);
+            Check("空结果返回插入点本身", Near(empty, 5000, 3000), empty.ToString());
+        }
+
+        private static bool Near(Vec2 p, double x, double y)
+        {
+            return Math.Abs(p.X - x) < 1e-6 && Math.Abs(p.Y - y) < 1e-6;
         }
 
         // ------------------------------------------------------------------

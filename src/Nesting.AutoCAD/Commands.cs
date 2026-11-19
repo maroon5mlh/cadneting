@@ -31,6 +31,13 @@ namespace Nesting.AutoCAD
         private static string _lastJobPath;
 
         /// <summary>
+        /// 上一次用的插入点（WCS，第一张板左下角）。
+        /// 默认原点：老图纸都在原点附近作业，首次用不着点也能落回原处；
+        /// 之后每次拾取都会记住，换方案重排时回车即可原地覆盖。
+        /// </summary>
+        private static Point3d _insertOrigin = Point3d.Origin;
+
+        /// <summary>
         /// 模型用的是 public 字段而非属性，必须开 IncludeFields。
         /// UnsafeRelaxedJsonEscaping 保证中文块名不被转义成 \uXXXX。
         /// </summary>
@@ -336,7 +343,10 @@ namespace Nesting.AutoCAD
                 return;
             }
 
-            ApplyResult(ed, db, result);
+            Point3d origin;
+            if (!AskInsertPoint(ed, result, out origin)) return;
+
+            ApplyResult(ed, db, result, origin);
             PrintResult(ed, result);
         }
 
@@ -405,7 +415,14 @@ namespace Nesting.AutoCAD
             File.WriteAllText(outPath, JsonSerializer.Serialize(result, JsonOpts),
                               new UTF8Encoding(false));
 
-            ApplyResult(ed, db, result);
+            Point3d origin;
+            if (!AskInsertPoint(ed, result, out origin))
+            {
+                ed.WriteMessage("\n结果文件已保存：" + outPath);
+                return;
+            }
+
+            ApplyResult(ed, db, result, origin);
             PrintResult(ed, result);
 
             ed.WriteMessage("\n结果文件：" + outPath);
@@ -554,14 +571,24 @@ namespace Nesting.AutoCAD
                     return;
                 }
 
-                ApplyResult(ed, db, chosen.Result);
+                // 先亮方案表再问插入点：用户是看着张数/利用率决定放不放的，
+                // 点了 ESC 也不该丢掉已经算好的方案
+                ctl.ShowResult(chosen.Result, qty, chosen.Detail);
+
+                Point3d origin;
+                if (!AskInsertPoint(ed, chosen.Result, out origin))
+                {
+                    ed.WriteMessage("\n方案已保留在面板里，稍后可点「应用选中」再摆。");
+                    return;
+                }
+
+                ApplyResult(ed, db, chosen.Result, origin);
 
                 ed.WriteMessage(string.Format("\n已按「{0}」摆放：{1} 张板，利用率 {2:P2}，耗时 {3} ms",
                     chosen.Name, chosen.Result.Sheets.Count, chosen.Result.TotalUtilization,
                     chosen.Result.ElapsedMs));
                 ed.WriteMessage("\n换方案：在面板的「方案对比」里选中另一行 → 点「应用选中」。");
 
-                ctl.ShowResult(chosen.Result, qty, chosen.Detail);
                 DumpWarnings(ed, warnings);
                 if (chosen.Result.Warnings != null) DumpWarnings(ed, chosen.Result.Warnings);
             }
@@ -637,10 +664,16 @@ namespace Nesting.AutoCAD
 
             try
             {
+                // 换方案时也重新问插入点：板数变了，原来的位置可能已经压到别的东西。
+                // 回车沿用上次的点即可原地重排，所以这一步并不打断"连续比几个方案"
+                ctl.ShowResult(plan.Result, ctl.PartCount, plan.Detail);
+
+                Point3d origin;
+                if (!AskInsertPoint(ed, plan.Result, out origin)) return;
+
                 // 块是按包围盒重新锚定的绝对定位，重复应用不会累积偏移，
                 // 所以"选错了换个方案"可以随便点，不需要先撤销
-                ApplyResult(ed, db, plan.Result);
-                ctl.ShowResult(plan.Result, ctl.PartCount, plan.Detail);
+                ApplyResult(ed, db, plan.Result, origin);
 
                 ed.WriteMessage(string.Format("\n已切换到「{0}」：{1} 张板，利用率 {2:P1}，用料 {3:F2} m²",
                     plan.Name, plan.SheetCount, plan.Utilization, plan.SheetArea));
@@ -651,6 +684,68 @@ namespace Nesting.AutoCAD
             {
                 ed.WriteMessage("\n应用方案失败：" + ex.GetType().Name + " - " + ex.Message);
             }
+        }
+
+        /// <summary>
+        /// 让用户用鼠标点出排样整体的插入点（第一张板左下角）。
+        /// 返回 false 表示用户按 ESC 放弃摆放。
+        /// </summary>
+        private static bool AskInsertPoint(Editor ed, NestResult result, out Point3d origin)
+        {
+            origin = _insertOrigin;
+            if (result == null || result.Sheets == null || result.Sheets.Count == 0) return true;
+
+            ed.WriteMessage(string.Format(
+                "\n上次插入点 ({0:0.##}, {1:0.##})，回车沿用；ESC 取消摆放。",
+                _insertOrigin.X, _insertOrigin.Y));
+
+            SheetResult first = result.Sheets[0];
+            int sheetCount = result.Sheets.Count;
+
+            try
+            {
+                var jig = new InsertPointJig(first.Width, first.Height, _insertOrigin,
+                                             ed.CurrentUserCoordinateSystem);
+                PromptResult pr = ed.Drag(jig);
+
+                if (pr.Status == PromptStatus.OK)
+                {
+                    _insertOrigin = jig.Position;      // 点了新位置
+                }
+                else if (pr.Status == PromptStatus.Cancel && !jig.KeepPrevious)
+                {
+                    ed.WriteMessage("\n已取消摆放。");
+                    return false;                      // ESC
+                }
+                // 其余（Cancel + KeepPrevious = 空回车）→ 沿用上次的点
+                origin = _insertOrigin;
+            }
+            catch (System.Exception ex)
+            {
+                // jig 在极端情况下（视口被别的窗口抢占、图纸正在重生成）会抛，
+                // 退回普通取点，功能不能因此完全不可用
+                ed.WriteMessage("\n预览拾取不可用（" + ex.Message + "），改用普通取点。");
+                var ppo = new PromptPointOptions("\n指定插入点（第一张板的左下角）") { AllowNone = true };
+                PromptPointResult r = ed.GetPoint(ppo);
+                if (r.Status == PromptStatus.Cancel)
+                {
+                    ed.WriteMessage("\n已取消摆放。");
+                    return false;
+                }
+                if (r.Status == PromptStatus.OK)
+                {
+                    Point3d p = r.Value;
+                    // GetPoint 同样返回 UCS 点，板框是按 WCS 画的，先转换
+                    try { p = p.TransformBy(ed.CurrentUserCoordinateSystem); } catch { }
+                    _insertOrigin = new Point3d(p.X, p.Y, 0);
+                }
+                origin = _insertOrigin;
+            }
+
+            ed.WriteMessage(string.Format(
+                "\n插入点：({0:0.##}, {1:0.##})，板框向右排开，共 {2} 张板。",
+                origin.X, origin.Y, sheetCount));
+            return true;
         }
 
         private static void PrintResult(Editor ed, NestResult result)
@@ -685,14 +780,15 @@ namespace Nesting.AutoCAD
         }
 
         /// <summary>把排样结果写到模型空间：画板框 + 摆放块 + 带动跟随文字</summary>
-        private static void ApplyResult(Editor ed, Database db, NestResult result)
+        /// <param name="origin">插入点：第一张板的左下角（WCS）</param>
+        private static void ApplyResult(Editor ed, Database db, NestResult result, Point3d origin)
         {
             int moved = 0, missing = 0, failed = 0;
             int textMoved = 0, textMissing = 0, textFailed = 0;
             int clearedBorders = 0;
             string lastError = null;
-            double originX = 0;
-            const double gapBetweenSheets = 300;
+            var insert = new Vec2(origin.X, origin.Y);
+            int sheetIndex = 0;
 
             using (Transaction tr = db.TransactionManager.StartTransaction())
             {
@@ -710,7 +806,12 @@ namespace Nesting.AutoCAD
 
                 foreach (SheetResult sheet in result.Sheets)
                 {
-                    DrawSheetBorder(ms, tr, sheetLayerId, originX, 0, sheet.Width, sheet.Height);
+                    // 插入点在这里生效：板框与零件的坐标都从同一个板原点算出来，
+                    // 不会出现"框搬过去了、零件还在老地方"这种半截偏移
+                    Vec2 sheetOrigin = SheetLayout.SheetOrigin(result, sheetIndex, insert);
+
+                    DrawSheetBorder(ms, tr, sheetLayerId, sheetOrigin.X, sheetOrigin.Y,
+                                    sheet.Width, sheet.Height);
 
                     foreach (Placement pl in sheet.Items)
                     {
@@ -726,7 +827,8 @@ namespace Nesting.AutoCAD
                             var companions = CollectTexts(tr, db, pl, ref textMissing);
 
                             int ok, bad;
-                            ApplyPlacement(br, companions, originX + pl.X, pl.Y, pl.RotationDeg,
+                            ApplyPlacement(br, companions,
+                                           sheetOrigin.X + pl.X, sheetOrigin.Y + pl.Y, pl.RotationDeg,
                                            out ok, out bad);
 
                             moved++;
@@ -740,7 +842,7 @@ namespace Nesting.AutoCAD
                         }
                     }
 
-                    originX += sheet.Width + gapBetweenSheets;
+                    sheetIndex++;
                 }
 
                 tr.Commit();
