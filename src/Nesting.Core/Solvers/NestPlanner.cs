@@ -17,6 +17,7 @@ namespace Nesting.Core.Solvers
     ///   1. 基准        —— 完全按面板设置
     ///   2. 仅某规格    —— 每种勾选的板材单独跑一遍（库存约束）
     ///   3. 省料优先    —— 同样的板，目标换成用料面积最小
+    ///   3b. 小板优先   —— 大板优先的对照组：能进小板的件不占大板
     ///   4. 全转 90°    —— 仅当面板禁止旋转时给出，标注需确认纹向
     /// </summary>
     public static class NestPlanner
@@ -69,6 +70,20 @@ namespace Nesting.Core.Solvers
                 Add(plans, job, o, ref seq,
                     "省料优先",
                     "同样这批板，目标改为用料面积最小（张数可能多一两张）",
+                    false);
+            }
+
+            // ---- 3b. 小板优先：能进小板的件不占大板 ----
+            // 只在"当前是大板优先 + 勾了多种规格"时才有意义，否则和基准同解，
+            // 白占一行还让人以为漏看了什么
+            bool preferLarge = baseOpt.SheetPreferLargeOverride ?? job.Settings.SheetPreferLarge;
+            if (job.Sheets.Count > 1 && preferLarge)
+            {
+                var o = Clone(baseOpt);
+                o.SheetPreferLargeOverride = false;
+                Add(plans, job, o, ref seq,
+                    "小板优先",
+                    "能进小板的件不占大板：用料面积更省，但张数通常更多",
                     false);
             }
 
@@ -125,7 +140,8 @@ namespace Nesting.Core.Solvers
                 MaxAttempts = src.MaxAttempts,
                 RestrictSheets = src.RestrictSheets == null ? null : new List<SheetSpec>(src.RestrictSheets),
                 ObjectiveOverride = src.ObjectiveOverride,
-                AllowRotate90Override = src.AllowRotate90Override
+                AllowRotate90Override = src.AllowRotate90Override,
+                SheetPreferLargeOverride = src.SheetPreferLargeOverride
             };
         }
 

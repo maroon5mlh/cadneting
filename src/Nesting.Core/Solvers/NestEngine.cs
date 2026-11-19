@@ -39,6 +39,9 @@ namespace Nesting.Core.Solvers
 
             /// <summary>覆盖全局 90° 旋转开关（null = 用 job.Settings.AllowRotate90）</summary>
             public bool? AllowRotate90Override;
+
+            /// <summary>覆盖"大板优先"（null = 用 job.Settings.SheetPreferLarge）</summary>
+            public bool? SheetPreferLargeOverride;
         }
 
         public static NestResult Solve(NestJob job) { return Solve(job, new Options()); }
@@ -112,12 +115,18 @@ namespace Nesting.Core.Solvers
                 }
             }
 
-            // ---- 板材按面积升序：开新板时取「能装下的最小规格」，先省料再谈别的 ----
+            // ---- 板材顺序：默认大板优先，开新板取「能装下的最大规格」 ----
+            // 车间习惯是先切整张大板：大板装得多、张数少，剩下的超幅件才用小板。
+            // 关掉这个开关就退化成「能装下的最小板」（省料，但张数多，
+            // 而且勾了 2250 之后 2440/3050 可能一张都开不出来）。
             // 方案对比可限定规格集合（"库存只有 1220x2440"这种现实约束）
             var sheetSource = (opt.RestrictSheets != null && opt.RestrictSheets.Count > 0)
                               ? opt.RestrictSheets : job.Sheets;
             var specs = new List<SheetSpec>(sheetSource);
             specs.Sort((a, b) => (a.Width * a.Height).CompareTo(b.Width * b.Height));
+
+            bool preferLarge = opt.SheetPreferLargeOverride ?? job.Settings.SheetPreferLarge;
+            if (preferLarge) specs.Reverse();
 
             double spacing = job.Settings.SpacingMm;
             double margin = job.Settings.MarginMm > 0 ? job.Settings.MarginMm : 0;
@@ -138,20 +147,18 @@ namespace Nesting.Core.Solvers
                 PackHeuristic.BottomLeft
             };
 
-            // ---- 候选规格组合：混排 + 每种单一规格 ----
+            // ---- 候选规格组合：只跑混排 ----
             //
-            // 为什么必须跑单一规格：开新板时是逐件贪心选「能装下的最小板」。
-            // 一旦面板里同时勾了 2250 和 2440，凡是能进 2250 的件都会开 2250，
-            // 2440 永远开不出来 —— 实测 428 件会从「69 张 2440」变成「75 张 2250」，
-            // 总面积几乎一样，但主目标（张数最少）反而变差。
-            // 所以要按整体结果择优，而不是逐件贪心。
-            var specSets = new List<List<SheetSpec>>();
-            specSets.Add(new List<SheetSpec>(specs));
-            if (specs.Count > 1)
-            {
-                foreach (SheetSpec s in specs)
-                    specSets.Add(new List<SheetSpec> { s });
-            }
+            // 规格顺序就是策略本身：大板优先 = 从大到小试，小板优先 = 从小到大试。
+            // 早先还要额外跑"每种单一规格"，是因为最小板优先会把大板饿死
+            // （同时勾 2250 和 2440 时 2440 永远开不出来，实测 428 件从
+            // 「69 张 2440」变成「75 张 2250」），只能靠单规格方案兜底。
+            //
+            // 现在顺序是用户显式选的策略，引擎不该再用"张数最少"把它覆盖回
+            // 另一种板型 —— 那样用户勾了"大板优先"却拿到小板方案，表现就是开关没反应。
+            // "库存只有某一种板会怎样"由 NestPlanner 用 RestrictSheets 单独算，
+            // 那是业务问题，不是引擎该替用户猜的组合。
+            var specSets = new List<List<SheetSpec>> { new List<SheetSpec>(specs) };
 
             List<PackBin> best = null;             // 按当前目标选出的最优解
             List<PackBin> bestByArea = null;       // 备选：板材总面积最小的解

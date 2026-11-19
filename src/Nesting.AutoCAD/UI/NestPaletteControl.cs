@@ -22,6 +22,7 @@ namespace Nesting.AutoCAD.UI
         public NumericUpDown MarginBox;
         public CheckBox RotateCheck;
         public CheckBox FollowText;
+        public CheckBox PreferLargeCheck;
         public TextBox KeywordBox;
         public Button RunButton;
         public DataGridView PlanGrid;
@@ -134,7 +135,7 @@ namespace Nesting.AutoCAD.UI
             {
                 Dock = DockStyle.Fill,
                 ColumnCount = 2,
-                RowCount = 3,
+                RowCount = 4,
                 AutoSize = true,
                 AutoSizeMode = AutoSizeMode.GrowAndShrink,
                 Margin = new Padding(0, 2, 0, 8)
@@ -223,10 +224,41 @@ namespace Nesting.AutoCAD.UI
                 Margin = new Padding(0, 6, 0, 0)
             };
 
+            // ToolTip 必须先建：下面几个控件的说明都挂在它上面，
+            // 而且必须留字段引用，否则被 GC 后提示就消失了
+            _tip = new ToolTip();
+
             paramGrid.Controls.Add(spacingPanel, 0, 0);
             paramGrid.Controls.Add(marginPanel, 1, 0);
             paramGrid.Controls.Add(RotateCheck, 0, 1);
             paramGrid.Controls.Add(FollowText, 1, 1);
+
+            // 大板优先：勾了多种规格时的用板顺序。
+            // 默认开：开料习惯是先切整张大板，剩下的超幅件才用小板；
+            // 关掉换成"能装下的最小板"，用料面积更省但张数更多。
+            PreferLargeCheck = new CheckBox
+            {
+                Text = "大板优先",
+                Checked = true,
+                AutoSize = true,
+                Margin = new Padding(0, 6, 0, 0)
+            };
+            if (_tip != null)
+            {
+                _tip.SetToolTip(PreferLargeCheck,
+                    "勾选多种规格时的开板顺序。\n" +
+                    "开：先把大板排满，剩下的（超幅）件再用小板。\n" +
+                    "关：能进小板的件就用小板，用料面积更省。");
+            }
+            var preferHint = new Label
+            {
+                Text = "先排满大板",
+                AutoSize = true,
+                ForeColor = SystemColors.GrayText,
+                Margin = new Padding(0, 8, 0, 0)
+            };
+            paramGrid.Controls.Add(PreferLargeCheck, 0, 2);
+            paramGrid.Controls.Add(preferHint, 1, 2);
 
             // 关键字必须能改：图纸里的块名是「铰包边 / 中横板」，和口头说的
             // 「顶包边 / 中横框」经常差一个字，写死在代码里等于这个功能用不上
@@ -242,12 +274,10 @@ namespace Nesting.AutoCAD.UI
                 Dock = DockStyle.Fill,
                 Margin = new Padding(0, 5, 0, 0)
             };
-            var kwTip = new ToolTip();
-            kwTip.SetToolTip(KeywordBox, "块名包含任一关键字即允许 90° 旋转，不受上面的全局开关影响。\n用顿号、逗号或空格分隔。");
-            _tip = kwTip;   // 保留引用，否则 ToolTip 被 GC 后提示就消失了
+            _tip.SetToolTip(KeywordBox, "块名包含任一关键字即允许 90° 旋转，不受上面的全局开关影响。\n用顿号、逗号或空格分隔。");
 
-            paramGrid.Controls.Add(kwLabel, 0, 2);
-            paramGrid.Controls.Add(KeywordBox, 1, 2);
+            paramGrid.Controls.Add(kwLabel, 0, 3);
+            paramGrid.Controls.Add(KeywordBox, 1, 3);
 
             // ---- 主按钮 ----
             RunButton = new Button
@@ -422,6 +452,7 @@ namespace Nesting.AutoCAD.UI
             MarginBox.ValueChanged += OnAnySettingChanged;
             RotateCheck.CheckedChanged += OnAnySettingChanged;
             FollowText.CheckedChanged += OnAnySettingChanged;
+            PreferLargeCheck.CheckedChanged += OnAnySettingChanged;
             KeywordBox.Leave += OnAnySettingChanged;
 
             // 勾选框必须显式提交，否则 CellValueChanged 要等离开单元格才触发，
@@ -458,6 +489,7 @@ namespace Nesting.AutoCAD.UI
                 MarginMm = (double)MarginBox.Value,
                 AllowRotate90 = RotateCheck.Checked,
                 FollowText = FollowText.Checked,
+                SheetPreferLarge = PreferLargeCheck.Checked,
                 Keywords = KeywordBox.Text ?? ""
             };
 
@@ -509,6 +541,7 @@ namespace Nesting.AutoCAD.UI
                 MarginBox.Value = Clamp(MarginBox, saved.MarginMm);
                 RotateCheck.Checked = saved.AllowRotate90;
                 FollowText.Checked = saved.FollowText;
+                PreferLargeCheck.Checked = saved.SheetPreferLarge;
 
                 if (!string.IsNullOrWhiteSpace(saved.Keywords)) KeywordBox.Text = saved.Keywords;
             }
@@ -562,6 +595,7 @@ namespace Nesting.AutoCAD.UI
                 SpacingMm = (double)SpacingBox.Value,
                 MarginMm = (double)MarginBox.Value,
                 AllowRotate90 = RotateCheck.Checked,
+                SheetPreferLarge = PreferLargeCheck.Checked,
                 Objective = "sheets"
             };
 

@@ -33,6 +33,10 @@ namespace Nesting.AutoCAD.UI
         public double MarginMm = 5;
         public bool AllowRotate90 = false;
         public bool FollowText = true;
+
+        /// <summary>多规格时是否大板优先（默认是，与 NestSettings.SheetPreferLarge 同义）</summary>
+        public bool SheetPreferLarge = true;
+
         public string Keywords = "";
 
         /// <summary>最近一次读/写失败的原因，供 NESTDIAG 显示</summary>

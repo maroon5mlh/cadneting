@@ -186,6 +186,15 @@ namespace Nesting.Core
         /// <summary>引擎计算时间上限（秒），到点取当前最优解</summary>
         public int TimeLimitSec = 60;
 
+        /// <summary>
+        /// 多规格时是否"大板优先"：开新板先挑能装下的最大规格，把大板排满，
+        /// 剩下来的（超幅件）才落到小板。默认开启。
+        ///
+        /// 关掉就退回"能装下的最小板"：用料面积更省，但张数通常更多，
+        /// 而且会出现"大板一张都开不出来"的情况（件件都进得了小板）。
+        /// </summary>
+        public bool SheetPreferLarge = true;
+
         /// <summary>优化目标：sheets=最少张数，cost=最低成本，area=最高利用率</summary>
         public string Objective = "sheets";
 

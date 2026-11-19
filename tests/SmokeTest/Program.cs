@@ -37,6 +37,7 @@ namespace SmokeTest
             TestNestRealJob();
             TestNestStress();
             TestSpecSelection();
+            TestSheetPreferLarge();
             TestPlanCompare();
             TestMargin();
             TestKeywordRotation();
@@ -451,16 +452,25 @@ namespace SmokeTest
             Check("规格择优：三规格全部落位", CountPlaced(multi) == 200,
                   CountPlaced(multi) + "/200 件");
 
-            // 取舍必须报出来，否则用户只看利用率会以为方案变差了
+            // 取舍必须报出来，否则用户只看利用率会以为方案变差了。
+            // 大板优先之后，"张数最少"和"用料最省"经常是同一个解，
+            // 这时没有取舍可报；只有两个口径真的算出不同结果才要求提示。
             bool toldTradeoff = false;
             if (multi.Warnings != null)
                 foreach (string w in multi.Warnings)
                     if (w.Contains("省料优先")) { toldTradeoff = true; break; }
 
+            NestJob areaJob = Build(all);
+            areaJob.Settings.Objective = "area";
+            NestResult byArea = NestEngine.Solve(areaJob);
+            bool diverged = byArea.Sheets.Count != multi.Sheets.Count;
+
             Console.WriteLine("    三规格 " + multi.Sheets.Count + " 张（" +
                               multi.Sheets[0].SheetName + "），只用 2250 需 " +
-                              only.Sheets.Count + " 张");
-            Check("规格择优：张数与用料两个口径都报出", toldTradeoff, "");
+                              only.Sheets.Count + " 张；省料口径 " + byArea.Sheets.Count + " 张");
+            Check("规格择优：两口径有分歧时必须报出", !diverged || toldTradeoff,
+                  diverged ? "张数 " + multi.Sheets.Count + " vs 省料 " + byArea.Sheets.Count + "，但没提示"
+                           : "两口径同解，无需提示");
         }
 
         private static int CountPlaced(NestResult r)
@@ -468,6 +478,110 @@ namespace SmokeTest
             int n = 0;
             foreach (SheetResult s in r.Sheets) n += s.Items.Count;
             return n;
+        }
+
+        private static string SpecMixOf(NestResult r)
+        {
+            var mix = new Dictionary<string, int>();
+            foreach (SheetResult s in r.Sheets)
+            {
+                if (mix.ContainsKey(s.SheetName)) mix[s.SheetName]++;
+                else mix[s.SheetName] = 1;
+            }
+
+            var parts = new List<string>();
+            foreach (KeyValuePair<string, int> kv in mix) parts.Add(kv.Key + "×" + kv.Value);
+            parts.Sort(StringComparer.Ordinal);
+            return string.Join(" + ", parts);
+        }
+
+        private static bool AllSheetsAre(NestResult r, string name)
+        {
+            if (r.Sheets.Count == 0) return false;
+            foreach (SheetResult s in r.Sheets) if (s.SheetName != name) return false;
+            return true;
+        }
+
+        private static bool HasSheet(NestResult r, string name)
+        {
+            foreach (SheetResult s in r.Sheets) if (s.SheetName == name) return true;
+            return false;
+        }
+
+        // ------------------------------------------------------------------
+        // 大板优先：勾了多种规格时，先把大板排满，超幅/剩下的才用小板
+        // ------------------------------------------------------------------
+        private static void TestSheetPreferLarge()
+        {
+            Console.WriteLine("\n-- 大板优先 --");
+
+            // 小件 1000x600：2250 和 3050 都装得下；长件 1000x2400 只有 3050 装得下
+            NestJob Build(int longQty)
+            {
+                var job = new NestJob { BatchId = "LARGE", Unit = "mm" };
+                job.Sheets.Add(new SheetSpec { Name = "1220x2250", Width = 1220, Height = 2250 });
+                job.Sheets.Add(new SheetSpec { Name = "1220x3050", Width = 1220, Height = 3050 });
+                job.Settings.SpacingMm = 0;
+                job.Settings.MarginMm = 5;
+                job.Settings.AllowRotate90 = false;
+
+                var a = new PartType
+                {
+                    Id = "A", BlockName = "小件", Width = 1000, Height = 600,
+                    Quantity = 20, NetArea = 1000 * 600
+                };
+                a.Outer = Rect(0, 0, 1000, 600);
+                job.Parts.Add(a);
+
+                if (longQty > 0)
+                {
+                    var b = new PartType
+                    {
+                        Id = "B", BlockName = "长件", Width = 1000, Height = 2400,
+                        Quantity = longQty, NetArea = 1000 * 2400
+                    };
+                    b.Outer = Rect(0, 0, 1000, 2400);
+                    job.Parts.Add(b);
+                }
+                return job;
+            }
+
+            // ---- 只用小件：两种策略的差异最干净 ----
+            NestJob largeOnly = Build(0);
+            largeOnly.Settings.SheetPreferLarge = true;
+            NestResult large = NestEngine.Solve(largeOnly);
+
+            NestJob smallOnly = Build(0);
+            smallOnly.Settings.SheetPreferLarge = false;
+            NestResult small = NestEngine.Solve(smallOnly);
+
+            Check("大板优先：小件也先上大板", AllSheetsAre(large, "1220x3050"), SpecMixOf(large));
+            Check("小板优先：装得下就不占大板", AllSheetsAre(small, "1220x2250"), SpecMixOf(small));
+            Check("两种策略零件都落位",
+                  CountPlaced(large) == 20 && CountPlaced(small) == 20,
+                  CountPlaced(large) + " / " + CountPlaced(small) + " 件");
+            Check("大板优先张数更少", large.Sheets.Count < small.Sheets.Count,
+                  large.Sheets.Count + " 张 vs " + small.Sheets.Count + " 张");
+
+            // ---- 混进超幅件：只能进 3050，剩下的小件仍按自身尺寸走 ----
+            NestJob mixed = Build(2);
+            mixed.Settings.SheetPreferLarge = true;
+            NestResult mixedLarge = NestEngine.Solve(mixed);
+
+            NestJob mixedSmall = Build(2);
+            mixedSmall.Settings.SheetPreferLarge = false;
+            NestResult mixedSmallRes = NestEngine.Solve(mixedSmall);
+
+            Check("超幅件两种策略下都只能用 3050",
+                  HasSheet(mixedLarge, "1220x3050") && HasSheet(mixedSmallRes, "1220x3050"),
+                  SpecMixOf(mixedLarge) + "｜" + SpecMixOf(mixedSmallRes));
+            Check("混排零件全部落位",
+                  CountPlaced(mixedLarge) == 22 && CountPlaced(mixedSmallRes) == 22,
+                  CountPlaced(mixedLarge) + " / " + CountPlaced(mixedSmallRes) + " 件");
+
+            Console.WriteLine("    纯小件：大板优先 " + SpecMixOf(large) + "，小板优先 " + SpecMixOf(small));
+            Console.WriteLine("    含超幅件：大板优先 " + SpecMixOf(mixedLarge) +
+                              "，小板优先 " + SpecMixOf(mixedSmallRes));
         }
 
         // ------------------------------------------------------------------
@@ -913,6 +1027,7 @@ namespace SmokeTest
                   def.Sheets.Exists(s => Math.Abs(s.W - 1220) < 1e-9 && Math.Abs(s.H - 2250) < 1e-9), "");
             Check("默认间距为 0", Math.Abs(def.SpacingMm) < 1e-12, def.SpacingMm.ToString());
             Check("默认不勾选旋转", !def.AllowRotate90, def.AllowRotate90 ? "true（应 false）" : "");
+            Check("默认大板优先", def.SheetPreferLarge, def.SheetPreferLarge ? "" : "false（应 true）");
 
             string dir = Path.Combine(Path.GetTempPath(), "nest-settings-test-" + Guid.NewGuid().ToString("N"));
             string file = Path.Combine(dir, "panel-settings.json");
@@ -926,6 +1041,7 @@ namespace SmokeTest
                     MarginMm = 12.5,
                     AllowRotate90 = false,
                     FollowText = true,
+                    SheetPreferLarge = false,   // 关掉也要能原样存回来
                     Keywords = "铰包边、中横板"
                 };
                 custom.Sheets.Add(new PanelSheetRow { Use = true, Name = "1220x2250", W = 1220, H = 2250 });
@@ -940,6 +1056,7 @@ namespace SmokeTest
                     Check("往返：间距 0 保持不变", Math.Abs(back.SpacingMm) < 1e-12, back.SpacingMm.ToString());
                     Check("往返：留边 12.5", Math.Abs(back.MarginMm - 12.5) < 1e-9, back.MarginMm.ToString());
                     Check("往返：旋转开关保持 false", !back.AllowRotate90, "");
+                    Check("往返：大板优先开关保持 false", !back.SheetPreferLarge, "");
                     Check("往返：板材条目数", back.Sheets.Count == 2, back.Sheets.Count + " 条");
                     Check("往返：未勾选状态保留",
                           back.Sheets.Count == 2 && !back.Sheets[1].Use,

@@ -27,6 +27,9 @@ namespace Nesting.AutoCAD
         private const double FlattenTolerance = 0.1;   // mm
         private const string SheetLayer = "NEST_SHEET";
 
+        /// <summary>板框的 XData 应用名：用来标记"这个框是哪一批零件排出来的"</summary>
+        private const string SheetAppName = "CADNESTING_SHEET";
+
         /// <summary>最近一次导出的任务文件，方便紧接着排样</summary>
         private static string _lastJobPath;
 
@@ -799,9 +802,17 @@ namespace Nesting.AutoCAD
                 // 会抛 eKeyNotFound，而且会让整个事务回滚，块一件都不会动
                 ObjectId sheetLayerId = EnsureLayer(tr, db, SheetLayer);
 
+                // 本批的指纹（零件句柄集合），写进板框的 XData。
+                // 同一批换方案/重排时指纹不变，框才能被认出并刷新；
+                // 换成另一批零件时指纹不同，上一批的框就绝不会被碰
+                string signature = BatchSignature(result);
+                bool canTag = EnsureRegApp(tr, db);
+
                 // 换方案时会重画板框。不清掉旧的，图上就会一层层叠出十几个板框，
-                // 看起来像是"方案没换成功"，实际是框叠在一起了
-                int cleared = ClearSheetBorders(tr, sheetLayerId);
+                // 看起来像是"方案没换成功"，实际是框叠在一起了。
+                // 但绝不能整层清空：用户是分批排的，第二批一来就把第一批的框删掉，
+                // 上一批的料会只剩零件、没有板框（真实报障）。
+                int cleared = ClearSheetBorders(tr, sheetLayerId, db, result, signature);
                 clearedBorders = cleared;
 
                 foreach (SheetResult sheet in result.Sheets)
@@ -811,7 +822,7 @@ namespace Nesting.AutoCAD
                     Vec2 sheetOrigin = SheetLayout.SheetOrigin(result, sheetIndex, insert);
 
                     DrawSheetBorder(ms, tr, sheetLayerId, sheetOrigin.X, sheetOrigin.Y,
-                                    sheet.Width, sheet.Height);
+                                    sheet.Width, sheet.Height, canTag ? signature : null);
 
                     foreach (Placement pl in sheet.Items)
                     {
@@ -1016,7 +1027,7 @@ namespace Nesting.AutoCAD
         }
 
         private static void DrawSheetBorder(BlockTableRecord ms, Transaction tr, ObjectId layerId,
-                                            double x, double y, double w, double h)
+                                            double x, double y, double w, double h, string signature)
         {
             var pl = new Autodesk.AutoCAD.DatabaseServices.Polyline(4);
             pl.AddVertexAt(0, new Point2d(x, y), 0, 0, 0);
@@ -1029,23 +1040,139 @@ namespace Nesting.AutoCAD
 
             ms.AppendEntity(pl);
             tr.AddNewlyCreatedDBObject(pl, true);
+
+            if (!string.IsNullOrEmpty(signature)) TagSheet(pl, signature);
         }
 
         /// <summary>
-        /// 清掉本插件上一版画的板框。
+        /// 本批零件的指纹：把件句柄排序后做 FNV-1a。
         ///
-        /// 只删"本插件画的"那一种：NEST_SHEET 图层上、闭合、正好 4 个顶点。
-        /// 不能整层清空 —— 用户完全可能自己往这一层放东西，
-        /// 而误删用户图元是不可挽回的（这个插件已经会移动块，不能再多一个破坏动作）。
+        /// 用句柄而不是块名/数量：同一品种的两批料块名完全一样，
+        /// 只有句柄能区分"还是这批"和"又来一批"。
+        /// 不依赖块当前位置，所以零件被挪动过、重排时照样认得出。
         /// </summary>
-        private static int ClearSheetBorders(Transaction tr, ObjectId layerId)
+        private static string BatchSignature(NestResult result)
         {
-            Database db = layerId.Database;
-            if (db == null) return 0;
+            var handles = new List<string>();
+            if (result != null && result.Sheets != null)
+            {
+                foreach (SheetResult s in result.Sheets)
+                {
+                    if (s.Items == null) continue;
+                    foreach (Placement p in s.Items)
+                        if (!string.IsNullOrEmpty(p.Handle)) handles.Add(p.Handle);
+                }
+            }
+            handles.Sort(StringComparer.OrdinalIgnoreCase);
+
+            ulong h = 14695981039346656037UL;
+            foreach (string s in handles)
+                foreach (char c in s) { h ^= c; h *= 1099511628211UL; }
+
+            return handles.Count.ToString("X") + "-" + h.ToString("X16");
+        }
+
+        /// <summary>注册 XData 应用名；失败返回 false（图纸只读等），框就不带批次标记</summary>
+        private static bool EnsureRegApp(Transaction tr, Database db)
+        {
+            try
+            {
+                RegAppTable rat = (RegAppTable)tr.GetObject(db.RegAppTableId, OpenMode.ForRead);
+                if (rat.Has(SheetAppName)) return true;
+
+                rat.UpgradeOpen();
+                var rec = new RegAppTableRecord { Name = SheetAppName };
+                rat.Add(rec);
+                tr.AddNewlyCreatedDBObject(rec, true);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static void TagSheet(Entity e, string signature)
+        {
+            try
+            {
+                e.XData = new ResultBuffer(
+                    new TypedValue((int)DxfCode.ExtendedDataRegAppName, SheetAppName),
+                    new TypedValue((int)DxfCode.ExtendedDataAsciiString, signature));
+            }
+            catch { /* 写不进标记不影响画框，只是下次只能靠几何判断归属 */ }
+        }
+
+        /// <summary>读板框上的批次标记；没有/不是本插件的返回 null</summary>
+        private static string ReadSheetTag(Entity e)
+        {
+            try
+            {
+                using (ResultBuffer rb = e.XData)
+                {
+                    if (rb == null) return null;
+
+                    TypedValue[] vals = rb.AsArray();
+                    if (vals.Length < 2) return null;
+                    if (vals[0].TypeCode != (int)DxfCode.ExtendedDataRegAppName) return null;
+                    if (!string.Equals(Convert.ToString(vals[0].Value), SheetAppName,
+                                       StringComparison.Ordinal)) return null;
+
+                    return Convert.ToString(vals[1].Value);
+                }
+            }
+            catch { return null; }
+        }
+
+        /// <summary>
+        /// 清掉本插件上一版画的板框 —— 但只清"属于这批零件"的那些。
+        ///
+        /// 两级判据：
+        ///   1. 框上带批次标记（XData）→ 标记等于本批指纹才清。
+        ///      这条不受块当前位置影响，所以"换了方案""同一批重排"都认得出，
+        ///      而"另一批零件恰好堆在这个框里"也不会误删。
+        ///   2. 没有标记（旧版本插件画的）→ 退化成几何判断：框里装着本批的块就清。
+        ///
+        /// 为什么不能整层清空：用户是分批排的，第二批一来就把第一批的框删掉，
+        /// 上一批的料会只剩零件没有板框（真实报障）。板框长得都一样、图层也一样，
+        /// 能区分批次的只有"框上记的批次"和"框里装的是谁"。
+        /// </summary>
+        private static int ClearSheetBorders(Transaction tr, ObjectId layerId, Database db,
+                                             NestResult result, string signature)
+        {
+            if (result == null || result.Sheets == null) return 0;
+
+            // 本批零件在图纸上的当前位置（包围盒中心），移动之前取。
+            // 只用于没有标记的旧框，新框一律走批次标记
+            var centers = new List<Point2d>();
+            foreach (SheetResult s in result.Sheets)
+            {
+                if (s.Items == null) continue;
+
+                foreach (Placement p in s.Items)
+                {
+                    ObjectId bid = GetIdByHandle(db, p.Handle);
+                    if (bid.IsNull) continue;
+
+                    try
+                    {
+                        var br = tr.GetObject(bid, OpenMode.ForRead, false) as BlockReference;
+                        if (br == null) continue;
+
+                        Extents3d e = br.GeometricExtents;
+                        centers.Add(new Point2d((e.MinPoint.X + e.MaxPoint.X) * 0.5,
+                                                (e.MinPoint.Y + e.MaxPoint.Y) * 0.5));
+                    }
+                    catch { /* 取不到范围的件不参与归属判断，不影响别的 */ }
+                }
+            }
+
+            Database dbase = layerId.Database ?? db;
+            if (dbase == null) return 0;
 
             var doomed = new List<ObjectId>();
 
-            BlockTable bt = (BlockTable)tr.GetObject(db.BlockTableId, OpenMode.ForRead);
+            BlockTable bt = (BlockTable)tr.GetObject(dbase.BlockTableId, OpenMode.ForRead);
             BlockTableRecord ms = (BlockTableRecord)tr.GetObject(bt[BlockTableRecord.ModelSpace], OpenMode.ForRead);
 
             foreach (ObjectId id in ms)
@@ -1054,6 +1181,16 @@ namespace Nesting.AutoCAD
                 if (pl == null) continue;
                 if (pl.LayerId != layerId) continue;
                 if (!pl.Closed || pl.NumberOfVertices != 4) continue;
+
+                string tag = ReadSheetTag(pl);
+
+                bool mine;
+                if (!string.IsNullOrEmpty(tag))
+                    mine = string.Equals(tag, signature, StringComparison.Ordinal);
+                else
+                    mine = centers.Count > 0 && HoldsAnyPoint(pl, centers);
+
+                if (!mine) continue;   // 别的批次的框：留着
                 doomed.Add(id);
             }
 
@@ -1070,6 +1207,32 @@ namespace Nesting.AutoCAD
                 catch { /* 单个删不掉不影响整批 */ }
             }
             return n;
+        }
+
+        /// <summary>这个矩形框里有没有落进给定的任一中心点</summary>
+        private static bool HoldsAnyPoint(Autodesk.AutoCAD.DatabaseServices.Polyline box,
+                                          List<Point2d> points)
+        {
+            double minX = double.MaxValue, minY = double.MaxValue;
+            double maxX = double.MinValue, maxY = double.MinValue;
+
+            for (int i = 0; i < box.NumberOfVertices; i++)
+            {
+                Point2d v = box.GetPoint2dAt(i);
+                if (v.X < minX) minX = v.X;
+                if (v.X > maxX) maxX = v.X;
+                if (v.Y < minY) minY = v.Y;
+                if (v.Y > maxY) maxY = v.Y;
+            }
+
+            const double tol = 1e-6;
+            for (int i = 0; i < points.Count; i++)
+            {
+                Point2d p = points[i];
+                if (p.X >= minX - tol && p.X <= maxX + tol &&
+                    p.Y >= minY - tol && p.Y <= maxY + tol) return true;
+            }
+            return false;
         }
 
         private static ObjectId GetIdByHandle(Database db, string hex)
