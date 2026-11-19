@@ -243,4 +243,46 @@ namespace Nesting.Core
         /// <summary>不影响出结果、但需要让用户知道的提示（异形件、近似处理等）</summary>
         public List<string> Warnings = new List<string>();
     }
+
+    /// <summary>
+    /// 一个"方案"：同一批零件在某种策略下排出来的完整结果 + 用于横向比较的指标。
+    /// 排样结果不是唯一的，换规格、换目标、放开旋转都能得到不同的版，
+    /// 该给用户看几个候选让人自己挑，而不是替他决定。
+    /// </summary>
+    public sealed class NestPlan
+    {
+        /// <summary>短标识：A/B/C…，界面上做行首</summary>
+        public string Id;
+
+        /// <summary>表格里显示的短名，如「基准」「省料」「仅 1220x2440」</summary>
+        public string Name;
+
+        /// <summary>一句话说明它和别的方案差在哪</summary>
+        public string Detail;
+
+        public NestResult Result;
+
+        public int SheetCount;
+
+        /// <summary>板材总面积（m²），材料成本口径</summary>
+        public double SheetArea;
+
+        public double Utilization;
+
+        /// <summary>规格构成，如「1220x3050×56」</summary>
+        public string SpecMix;
+
+        /// <summary>
+        /// true = 这个方案改变了工艺前提（放开了旋转），
+        /// 落地前必须人工确认纹向/折弯方向，不能当成默认推荐。
+        /// </summary>
+        public bool ChangesCraft;
+
+        public bool IsRecommended;
+
+        /// <summary>与这个方案同解的其它方案名（去重时合并进来的）</summary>
+        public List<string> SameAs = new List<string>();
+
+        public bool HasError { get { return Result == null || Result.Error != null; } }
+    }
 }

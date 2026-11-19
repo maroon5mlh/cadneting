@@ -27,6 +27,7 @@ namespace Nesting.AutoCAD.UI
             if (_control != null) return;
             _control = new NestPaletteControl { Dock = DockStyle.Fill };
             _control.RunButton.Click += OnRunClick;
+            _control.ApplyPlanButton.Click += OnApplyPlanClick;
         }
 
         public static void Show()
@@ -45,7 +46,9 @@ namespace Nesting.AutoCAD.UI
                     _palette.Style = PaletteSetStyles.ShowPropertiesMenu
                                    | PaletteSetStyles.ShowAutoHideButton
                                    | PaletteSetStyles.ShowCloseButton;
-                    _palette.MinimumSize = new Size(380, 560);
+                    // 高度从 560 提到 680：多了「方案对比」一块（标题 + 4~5 行表格），
+                    // 不放高就会把下方结果表挤成一条缝，看起来像"结果没出来"
+                    _palette.MinimumSize = new Size(380, 680);
                     _palette.DockEnabled = DockSides.Left | DockSides.Right;
                     _palette.Add("排样", _control);
                 }
@@ -76,8 +79,8 @@ namespace Nesting.AutoCAD.UI
                     _form = new Form
                     {
                         Text = "板材排样",
-                        Width = 430,
-                        Height = 680,
+                        Width = 440,
+                        Height = 800,
                         StartPosition = FormStartPosition.CenterScreen,
                         ShowInTaskbar = false,
                         MinimizeBox = false
@@ -106,6 +109,16 @@ namespace Nesting.AutoCAD.UI
             // 交给文档上下文执行：面板是模态外的，
             // 在控件事件里直接操作 Editor / Database 会抛 eInvalidContext
             doc.SendStringToExecute("NESTAUTO ", true, false, false);
+        }
+
+        private static void OnApplyPlanClick(object sender, EventArgs e)
+        {
+            var doc = AcadApp.DocumentManager.MdiActiveDocument;
+            if (doc == null) return;
+
+            // 不置 busy：这个动作不重新排样，只改块位置，几百毫秒内就结束，
+            // 置 busy 反而会闪一下按钮文字
+            doc.SendStringToExecute("NESTAPPLYPLAN ", true, false, false);
         }
     }
 }

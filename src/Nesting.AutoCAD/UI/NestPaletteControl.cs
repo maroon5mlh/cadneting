@@ -24,10 +24,18 @@ namespace Nesting.AutoCAD.UI
         public CheckBox FollowText;
         public TextBox KeywordBox;
         public Button RunButton;
+        public DataGridView PlanGrid;
+        public Button ApplyPlanButton;
         public DataGridView ResultGrid;
         public Label StatusLabel;
 
         private ToolTip _tip;
+
+        /// <summary>最近一次比出的候选方案，下标与 PlanGrid 的行一一对应</summary>
+        private List<NestPlan> _plans = new List<NestPlan>();
+
+        /// <summary>最近一次排样的零件件数，用于状态栏文案</summary>
+        private int _partCount;
 
         /// <summary>装载/恢复配置期间为 true，避免控件的 Changed 事件把半成品存盘</summary>
         private bool _loading;
@@ -52,7 +60,7 @@ namespace Nesting.AutoCAD.UI
             {
                 Dock = DockStyle.Fill,
                 ColumnCount = 1,
-                RowCount = 9,
+                RowCount = 11,
                 BackColor = SystemColors.Control
             };
             root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
@@ -244,13 +252,72 @@ namespace Nesting.AutoCAD.UI
             // ---- 主按钮 ----
             RunButton = new Button
             {
-                Text = "选择图形并排样",
+                Text = "选择图形并对比方案",
                 Dock = DockStyle.Fill,
                 Height = 42,
                 Margin = new Padding(0, 0, 0, 8),
                 Font = new Font(SystemFonts.MessageBoxFont.FontFamily,
                                  SystemFonts.MessageBoxFont.Size + 1.5f, FontStyle.Bold)
             };
+
+            // ---- 方案对比 ----
+            // 标题行右侧塞「应用选中」，比单独占一行省 30px 高度：
+            // 面板最窄 380、默认高 560，多一行就会把下方结果表挤成一条缝
+            var planTitleRow = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 2,
+                RowCount = 1,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Margin = new Padding(0)
+            };
+            planTitleRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            planTitleRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+
+            var planTitle = MakeSectionLabel("方案对比");
+            planTitle.Margin = new Padding(0);
+
+            ApplyPlanButton = MakeSmallButton("应用选中");
+            ApplyPlanButton.Enabled = false;
+            ApplyPlanButton.Margin = new Padding(0, 0, 0, 0);
+
+            planTitleRow.Controls.Add(planTitle, 0, 0);
+            planTitleRow.Controls.Add(ApplyPlanButton, 1, 0);
+
+            PlanGrid = new DataGridView
+            {
+                Dock = DockStyle.Fill,
+                AllowUserToAddRows = false,
+                AllowUserToDeleteRows = false,
+                AllowUserToResizeRows = false,
+                ReadOnly = true,
+                AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
+                BackgroundColor = SystemColors.Window,
+                BorderStyle = BorderStyle.FixedSingle,
+                RowHeadersVisible = false,
+                SelectionMode = DataGridViewSelectionMode.FullRowSelect,
+                MultiSelect = false,
+                ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing,
+                ColumnHeadersHeight = 26
+            };
+            PlanGrid.RowsDefaultCellStyle.Font = SystemFonts.MessageBoxFont;
+
+            var planName = new DataGridViewTextBoxColumn { HeaderText = "方案", FillWeight = 40 };
+            var planSheets = new DataGridViewTextBoxColumn { HeaderText = "张", FillWeight = 10 };
+            var planUtil = new DataGridViewTextBoxColumn { HeaderText = "利用率", FillWeight = 16 };
+            var planArea = new DataGridViewTextBoxColumn { HeaderText = "用料 m²", FillWeight = 16 };
+            var planMix = new DataGridViewTextBoxColumn { HeaderText = "规格", FillWeight = 18 };
+            planSheets.DefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleRight;
+            planUtil.DefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleRight;
+            planArea.DefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleRight;
+            planMix.DefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleRight;
+
+            PlanGrid.Columns.AddRange(planName, planSheets, planUtil, planArea, planMix);
+            foreach (DataGridViewColumn c in PlanGrid.Columns)
+                c.SortMode = DataGridViewColumnSortMode.NotSortable;
+
+            PlanGrid.SelectionChanged += OnPlanSelected;
 
             // ---- 结果 ----
             var resTitle = MakeSectionLabel("结果");
@@ -294,9 +361,11 @@ namespace Nesting.AutoCAD.UI
             root.Controls.Add(paramTitle, 0, 3);
             root.Controls.Add(paramGrid, 0, 4);
             root.Controls.Add(RunButton, 0, 5);
-            root.Controls.Add(resTitle, 0, 6);
-            root.Controls.Add(ResultGrid, 0, 7);
-            root.Controls.Add(StatusLabel, 0, 8);
+            root.Controls.Add(planTitleRow, 0, 6);
+            root.Controls.Add(PlanGrid, 0, 7);
+            root.Controls.Add(resTitle, 0, 8);
+            root.Controls.Add(ResultGrid, 0, 9);
+            root.Controls.Add(StatusLabel, 0, 10);
 
             root.RowStyles.Add(new RowStyle(SizeType.AutoSize));      // 0 title
             _sheetRowStyle = new RowStyle(SizeType.Absolute, 104);    // 1 sheet grid（行数变了要跟着调）
@@ -305,9 +374,11 @@ namespace Nesting.AutoCAD.UI
             root.RowStyles.Add(new RowStyle(SizeType.AutoSize));      // 3 title
             root.RowStyles.Add(new RowStyle(SizeType.AutoSize));      // 4 params
             root.RowStyles.Add(new RowStyle(SizeType.AutoSize));      // 5 run
-            root.RowStyles.Add(new RowStyle(SizeType.AutoSize));      // 6 title
-            root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));  // 7 results
-            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));  // 8 status
+            root.RowStyles.Add(new RowStyle(SizeType.AutoSize));      // 6 plan title
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 112)); // 7 plan grid
+            root.RowStyles.Add(new RowStyle(SizeType.AutoSize));      // 8 title
+            root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));  // 9 results
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));  // 10 status
 
             Controls.Add(root);
 
@@ -528,9 +599,14 @@ namespace Nesting.AutoCAD.UI
             return list;
         }
 
-        public void ShowResult(NestResult result, int partCount)
+        /// <param name="suffix">
+        /// 附加在状态栏末尾的说明（方案的差异描述、同解提示）。
+        /// 由调用方传进来而不是在这里回头查方案，是因为"应用方案"和"选中预览"
+        /// 两条路径都会刷这块状态栏，谁刷谁负责说清楚自己在展示什么。
+        /// </param>
+        public void ShowResult(NestResult result, int partCount, string suffix = null)
         {
-            if (InvokeRequired) { BeginInvoke(new Action(() => ShowResult(result, partCount))); return; }
+            if (InvokeRequired) { BeginInvoke(new Action(() => ShowResult(result, partCount, suffix))); return; }
 
             ResultGrid.Rows.Clear();
 
@@ -560,14 +636,107 @@ namespace Nesting.AutoCAD.UI
 
             if (result.Warnings != null && result.Warnings.Count > 0)
                 StatusLabel.Text += "（有提示）";
+
+            if (!string.IsNullOrEmpty(suffix))
+                StatusLabel.Text += "　｜　" + suffix;
         }
 
         public void SetBusy(bool busy)
         {
             if (InvokeRequired) { BeginInvoke(new Action(() => SetBusy(busy))); return; }
             RunButton.Enabled = !busy;
-            RunButton.Text = busy ? "排样中…" : "选择图形并排样";
+            RunButton.Text = busy ? "排样中…" : "选择图形并对比方案";
+            ApplyPlanButton.Enabled = !busy && SelectedPlan != null;
             Cursor = busy ? Cursors.WaitCursor : Cursors.Default;
+        }
+
+        // ------------------------------------------------------------------
+        // 方案对比
+        // ------------------------------------------------------------------
+
+        /// <summary>面板当前选中的方案；没有跑过对比时为 null</summary>
+        public NestPlan SelectedPlan
+        {
+            get
+            {
+                if (_plans.Count == 0) return null;
+                DataGridViewRow row = PlanGrid.CurrentRow;
+                if (row == null) return null;
+
+                int i = row.Index;
+                // 行序与 _plans 一一对应，越界说明表格被外部清过，宁可返回 null 也不猜
+                if (i < 0 || i >= _plans.Count) return null;
+                return _plans[i];
+            }
+        }
+
+        public int PartCount { get { return _partCount; } }
+
+        public void ShowPlans(List<NestPlan> plans, int partCount)
+        {
+            if (InvokeRequired) { BeginInvoke(new Action(() => ShowPlans(plans, partCount))); return; }
+
+            _plans = plans == null ? new List<NestPlan>() : plans;
+            _partCount = partCount;
+
+            PlanGrid.Rows.Clear();
+            foreach (NestPlan p in _plans)
+            {
+                string name = (p.IsRecommended ? "★ " : "") + p.Name + (p.ChangesCraft ? " ⚠" : "");
+                int i = PlanGrid.Rows.Add(
+                    name,
+                    p.HasError ? "-" : p.SheetCount.ToString(),
+                    p.HasError ? "-" : p.Utilization.ToString("P1"),
+                    p.HasError ? "-" : p.SheetArea.ToString("F2"),
+                    p.HasError ? "失败" : p.SpecMix);
+
+                DataGridViewRow row = PlanGrid.Rows[i];
+                row.Tag = p;
+
+                if (p.HasError)
+                {
+                    row.DefaultCellStyle.ForeColor = Color.Firebrick;
+                }
+                else                 if (p.ChangesCraft)
+                {
+                    // 改工艺前提的方案：橙色 + 提示。不能靠"用户自己会看说明"，
+                    // 这个方案通常张数最少，不标出来一定有人直接拿去切
+                    row.DefaultCellStyle.ForeColor = Color.FromArgb(200, 100, 0);
+                }
+            }
+
+            // 默认选推荐项，没有就选第一行（用户按下按钮时应该已经看到最优解）
+            int sel = 0;
+            for (int i = 0; i < _plans.Count; i++)
+                if (_plans[i].IsRecommended) { sel = i; break; }
+
+            if (PlanGrid.Rows.Count > 0)
+            {
+                PlanGrid.Rows[sel].Selected = true;
+                PlanGrid.CurrentCell = PlanGrid.Rows[sel].Cells[0];
+            }
+
+            ApplyPlanButton.Enabled = SelectedPlan != null && !SelectedPlan.HasError;
+        }
+
+        private void OnPlanSelected(object sender, EventArgs e)
+        {
+            NestPlan p = SelectedPlan;
+            if (p == null) return;
+
+            ApplyPlanButton.Enabled = !p.HasError;
+
+            // 选中即预览：结果表跟着切到该方案，不用先应用再撤销
+            if (!p.HasError)
+            {
+                string note = p.Detail;
+                if (p.SameAs.Count > 0)
+                    note += "（与「" + string.Join("、", p.SameAs) + "」结果相同）";
+                ShowResult(p.Result, _partCount, note);
+            }
+
+            if (_tip != null)
+                _tip.SetToolTip(PlanGrid, p.Detail ?? "");
         }
     }
 }

@@ -27,6 +27,18 @@ namespace Nesting.Core.Solvers
             /// 限次数只会让"张数最少"这个主目标被砍掉的组合拖累。
             /// </summary>
             public int MaxAttempts = 0;
+
+            /// <summary>
+            /// 只用这些规格跑（null / 空 = 用 job.Sheets）。<br/>
+            /// 方案对比里用来算"库存只有这一种板"的情形。
+            /// </summary>
+            public List<SheetSpec> RestrictSheets;
+
+            /// <summary>覆盖优化目标（null = 用 job.Settings.Objective）。"sheets" / "area"</summary>
+            public string ObjectiveOverride;
+
+            /// <summary>覆盖全局 90° 旋转开关（null = 用 job.Settings.AllowRotate90）</summary>
+            public bool? AllowRotate90Override;
         }
 
         public static NestResult Solve(NestJob job) { return Solve(job, new Options()); }
@@ -48,6 +60,12 @@ namespace Nesting.Core.Solvers
             }
 
             // ---- 展开零件实例 ----
+            // 方案对比会覆盖全局旋转开关：这里统一取"本次生效"的口径，
+            // 不要直接读 job.Settings.AllowRotate90，否则"全转 90°"那个方案会静默不生效
+            bool globalRotate = opt.AllowRotate90Override.HasValue
+                                ? opt.AllowRotate90Override.Value
+                                : job.Settings.AllowRotate90;
+
             var items = new List<PackItem>();
             foreach (PartType p in job.Parts)
             {
@@ -55,7 +73,7 @@ namespace Nesting.Core.Solvers
 
                 // 关键字白名单：块名含「顶包边/底框/中横框」的件即使全局关掉旋转也可转
                 bool canRotate = RotationPolicy.CanRotate(
-                    job.Settings.AllowRotate90, p.AllowRotate90, p.BlockName, job.Settings.RotateKeywords);
+                    globalRotate, p.AllowRotate90, p.BlockName, job.Settings.RotateKeywords);
 
                 for (int i = 0; i < qty; i++)
                 {
@@ -78,7 +96,7 @@ namespace Nesting.Core.Solvers
             // 全局关掉旋转时，关键字就是唯一的"放行通道"。
             // 如果一条都没命中（典型原因：关键字和实际块名不一致，比如「中横框」vs「中横板」），
             // 结果会是"所有件都不转、利用率掉几个点"，但表面上完全正常，必须主动报出来。
-            if (!job.Settings.AllowRotate90)
+            if (!globalRotate)
             {
                 int forced = 0;
                 foreach (PartType p in job.Parts)
@@ -95,7 +113,10 @@ namespace Nesting.Core.Solvers
             }
 
             // ---- 板材按面积升序：开新板时取「能装下的最小规格」，先省料再谈别的 ----
-            var specs = new List<SheetSpec>(job.Sheets);
+            // 方案对比可限定规格集合（"库存只有 1220x2440"这种现实约束）
+            var sheetSource = (opt.RestrictSheets != null && opt.RestrictSheets.Count > 0)
+                              ? opt.RestrictSheets : job.Sheets;
+            var specs = new List<SheetSpec>(sheetSource);
             specs.Sort((a, b) => (a.Width * a.Height).CompareTo(b.Width * b.Height));
 
             double spacing = job.Settings.SpacingMm;
@@ -140,7 +161,8 @@ namespace Nesting.Core.Solvers
             bool overBudget = false;
 
             // 目标口径：sheets = 张数最少（默认，少换板少上下料）；area = 总用料面积最小
-            bool preferArea = string.Equals(job.Settings.Objective, "area", StringComparison.OrdinalIgnoreCase);
+            bool preferArea = string.Equals(opt.ObjectiveOverride ?? job.Settings.Objective,
+                                            "area", StringComparison.OrdinalIgnoreCase);
 
             foreach (List<SheetSpec> specSet in specSets)
             {

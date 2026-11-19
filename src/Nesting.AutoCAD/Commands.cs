@@ -526,22 +526,44 @@ namespace Nesting.AutoCAD
                     job.Settings.SpacingMm, job.Settings.MarginMm,
                     followText ? textLinked : 0));
 
-                NestResult result = NestEngine.Solve(job);
+                // 同一批零件按几种策略各排一遍：张数最少的未必最省料，
+                // 而"只用 2440 会怎样"这类问题必须能回答，所以给候选而不是替用户决定
+                List<NestPlan> plans = NestPlanner.Compare(job);
 
-                if (result.Error != null)
+                if (plans.Count == 0)
                 {
-                    ed.WriteMessage("\n排样失败：" + result.Error);
-                    ctl.ShowResult(result, qty);
+                    ed.WriteMessage("\n排样失败：没有生成任何方案。");
                     return;
                 }
 
-                ApplyResult(ed, db, result);
-                ed.WriteMessage(string.Format("\n完成：{0} 张板，利用率 {1:P2}，耗时 {2} ms",
-                    result.Sheets.Count, result.TotalUtilization, result.ElapsedMs));
+                ctl.ShowPlans(plans, qty);
+                PrintPlanTable(ed, plans);
 
-                ctl.ShowResult(result, qty);
+                NestPlan chosen = null;
+                foreach (NestPlan p in plans)
+                    if (p.IsRecommended) { chosen = p; break; }
+                if (chosen == null)
+                    foreach (NestPlan p in plans)
+                        if (!p.HasError) { chosen = p; break; }
+
+                if (chosen == null)
+                {
+                    ed.WriteMessage("\n所有方案都排不下，请检查板材规格或留边设置。");
+                    if (plans[0].Result != null && plans[0].Result.Error != null)
+                        ed.WriteMessage("\n原因：" + plans[0].Result.Error);
+                    return;
+                }
+
+                ApplyResult(ed, db, chosen.Result);
+
+                ed.WriteMessage(string.Format("\n已按「{0}」摆放：{1} 张板，利用率 {2:P2}，耗时 {3} ms",
+                    chosen.Name, chosen.Result.Sheets.Count, chosen.Result.TotalUtilization,
+                    chosen.Result.ElapsedMs));
+                ed.WriteMessage("\n换方案：在面板的「方案对比」里选中另一行 → 点「应用选中」。");
+
+                ctl.ShowResult(chosen.Result, qty, chosen.Detail);
                 DumpWarnings(ed, warnings);
-                if (result.Warnings != null) DumpWarnings(ed, result.Warnings);
+                if (chosen.Result.Warnings != null) DumpWarnings(ed, chosen.Result.Warnings);
             }
             catch (System.Exception ex)
             {
@@ -551,6 +573,83 @@ namespace Nesting.AutoCAD
             finally
             {
                 ctl.SetBusy(false);
+            }
+        }
+
+        /// <summary>把候选方案打到命令行：面板窄，张数/用料这些要能一次看全</summary>
+        private static void PrintPlanTable(Editor ed, List<NestPlan> plans)
+        {
+            ed.WriteMessage("\n========== 方案对比 ==========");
+            ed.WriteMessage("\n  方案              张数   利用率     用料m²  规格");
+            ed.WriteMessage("\n--------------------------------------------------------");
+
+            foreach (NestPlan p in plans)
+            {
+                if (p.HasError)
+                {
+                    ed.WriteMessage(string.Format("\n{0} {1,-14}  失败：{2}",
+                        p.Id, p.Name, p.Result == null ? "" : p.Result.Error));
+                    continue;
+                }
+
+                ed.WriteMessage(string.Format("\n{0} {1}{2,-14} {3,4}  {4,7:P1}  {5,9:F2}  {6}{7}",
+                    p.Id,
+                    p.IsRecommended ? "★" : " ",
+                    p.Name,
+                    p.SheetCount,
+                    p.Utilization,
+                    p.SheetArea,
+                    p.SpecMix,
+                    p.ChangesCraft ? "  ← 改工艺前提，需确认纹向" : ""));
+            }
+
+            ed.WriteMessage("\n==============================");
+            ed.WriteMessage("\n★ = 推荐（不改工艺前提下 张数最少 → 用料最省）");
+        }
+
+        /// <summary>把面板上选中的方案落到图上（不改参数、不重新排样）</summary>
+        [CommandMethod("NESTAPPLYPLAN")]
+        public static void NestApplyPlan()
+        {
+            Document doc = Application.DocumentManager.MdiActiveDocument;
+            if (doc == null) return;
+            Editor ed = doc.Editor;
+            Database db = doc.Database;
+
+            NestPaletteControl ctl = NestPalette.Control;
+            if (ctl == null)
+            {
+                ed.WriteMessage("\n请先运行 NESTPANEL 打开排样面板。");
+                return;
+            }
+
+            NestPlan plan = ctl.SelectedPlan;
+            if (plan == null)
+            {
+                ed.WriteMessage("\n面板里还没有选中方案，请先点「选择图形并对比方案」。");
+                return;
+            }
+            if (plan.HasError)
+            {
+                ed.WriteMessage("\n这个方案没有排成功：" + (plan.Result == null ? "" : plan.Result.Error));
+                return;
+            }
+
+            try
+            {
+                // 块是按包围盒重新锚定的绝对定位，重复应用不会累积偏移，
+                // 所以"选错了换个方案"可以随便点，不需要先撤销
+                ApplyResult(ed, db, plan.Result);
+                ctl.ShowResult(plan.Result, ctl.PartCount, plan.Detail);
+
+                ed.WriteMessage(string.Format("\n已切换到「{0}」：{1} 张板，利用率 {2:P1}，用料 {3:F2} m²",
+                    plan.Name, plan.SheetCount, plan.Utilization, plan.SheetArea));
+                if (plan.ChangesCraft)
+                    ed.WriteMessage("\n注意：该方案放开了 90° 旋转，请确认零件纹向/折弯方向允许。");
+            }
+            catch (System.Exception ex)
+            {
+                ed.WriteMessage("\n应用方案失败：" + ex.GetType().Name + " - " + ex.Message);
             }
         }
 
@@ -590,6 +689,7 @@ namespace Nesting.AutoCAD
         {
             int moved = 0, missing = 0, failed = 0;
             int textMoved = 0, textMissing = 0, textFailed = 0;
+            int clearedBorders = 0;
             string lastError = null;
             double originX = 0;
             const double gapBetweenSheets = 300;
@@ -602,6 +702,11 @@ namespace Nesting.AutoCAD
                 // 板框图层按需创建：直接 pl.Layer = "NEST_SHEET" 在图层不存在时
                 // 会抛 eKeyNotFound，而且会让整个事务回滚，块一件都不会动
                 ObjectId sheetLayerId = EnsureLayer(tr, db, SheetLayer);
+
+                // 换方案时会重画板框。不清掉旧的，图上就会一层层叠出十几个板框，
+                // 看起来像是"方案没换成功"，实际是框叠在一起了
+                int cleared = ClearSheetBorders(tr, sheetLayerId);
+                clearedBorders = cleared;
 
                 foreach (SheetResult sheet in result.Sheets)
                 {
@@ -642,6 +747,8 @@ namespace Nesting.AutoCAD
             }
 
             ed.WriteMessage(string.Format("\n已摆放 {0} 件，未找到 {1} 件，失败 {2} 件。", moved, missing, failed));
+            if (clearedBorders > 0)
+                ed.WriteMessage(string.Format("\n已清除上一版板框 {0} 个。", clearedBorders));
             if (textMoved + textFailed + textMissing > 0)
             {
                 ed.WriteMessage(string.Format("\n跟随文字：移动 {0} 条，失败 {1} 条，找不到 {2} 条。",
@@ -820,6 +927,47 @@ namespace Nesting.AutoCAD
 
             ms.AppendEntity(pl);
             tr.AddNewlyCreatedDBObject(pl, true);
+        }
+
+        /// <summary>
+        /// 清掉本插件上一版画的板框。
+        ///
+        /// 只删"本插件画的"那一种：NEST_SHEET 图层上、闭合、正好 4 个顶点。
+        /// 不能整层清空 —— 用户完全可能自己往这一层放东西，
+        /// 而误删用户图元是不可挽回的（这个插件已经会移动块，不能再多一个破坏动作）。
+        /// </summary>
+        private static int ClearSheetBorders(Transaction tr, ObjectId layerId)
+        {
+            Database db = layerId.Database;
+            if (db == null) return 0;
+
+            var doomed = new List<ObjectId>();
+
+            BlockTable bt = (BlockTable)tr.GetObject(db.BlockTableId, OpenMode.ForRead);
+            BlockTableRecord ms = (BlockTableRecord)tr.GetObject(bt[BlockTableRecord.ModelSpace], OpenMode.ForRead);
+
+            foreach (ObjectId id in ms)
+            {
+                var pl = tr.GetObject(id, OpenMode.ForRead, false) as Autodesk.AutoCAD.DatabaseServices.Polyline;
+                if (pl == null) continue;
+                if (pl.LayerId != layerId) continue;
+                if (!pl.Closed || pl.NumberOfVertices != 4) continue;
+                doomed.Add(id);
+            }
+
+            int n = 0;
+            foreach (ObjectId id in doomed)
+            {
+                try
+                {
+                    var e = tr.GetObject(id, OpenMode.ForWrite, false) as Entity;
+                    if (e == null) continue;
+                    e.Erase();
+                    n++;
+                }
+                catch { /* 单个删不掉不影响整批 */ }
+            }
+            return n;
         }
 
         private static ObjectId GetIdByHandle(Database db, string hex)

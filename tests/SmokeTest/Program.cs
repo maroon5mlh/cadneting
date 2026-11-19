@@ -37,6 +37,7 @@ namespace SmokeTest
             TestNestRealJob();
             TestNestStress();
             TestSpecSelection();
+            TestPlanCompare();
             TestMargin();
             TestKeywordRotation();
             TestTextHandles();
@@ -466,6 +467,120 @@ namespace SmokeTest
             int n = 0;
             foreach (SheetResult s in r.Sheets) n += s.Items.Count;
             return n;
+        }
+
+        // ------------------------------------------------------------------
+        // 方案对比：多个候选必须各自成立、互有区别、推荐项可信
+        // ------------------------------------------------------------------
+        private static void TestPlanCompare()
+        {
+            var job = new NestJob { BatchId = "PLANS", Unit = "mm" };
+            job.Sheets.Add(new SheetSpec { Name = "1220x2440", Width = 1220, Height = 2440 });
+            job.Sheets.Add(new SheetSpec { Name = "1220x2250", Width = 1220, Height = 2250 });
+            job.Sheets.Add(new SheetSpec { Name = "1220x3050", Width = 1220, Height = 3050 });
+            job.Settings.SpacingMm = 0;
+            job.Settings.MarginMm = 5;
+            job.Settings.AllowRotate90 = false;   // 面板默认：不转 → 应额外给出「全转 90°」方案
+
+            var rnd = new Random(20261119);
+            double[] ws = { 645.4, 600, 330.6, 500, 400, 800 };
+            double[] hs = { 711, 776, 600, 450, 900, 500 };
+            int id = 0, total = 0;
+
+            for (int i = 0; i < 12; i++)
+            {
+                double w = ws[rnd.Next(ws.Length)];
+                double h = hs[rnd.Next(hs.Length)];
+                int qty = rnd.Next(5, 16);
+
+                var p = new PartType
+                {
+                    Id = "P" + (++id).ToString("000"),
+                    BlockName = "合成板" + id,
+                    Width = w,
+                    Height = h,
+                    Quantity = qty,
+                    NetArea = w * h * 0.995
+                };
+                p.Outer = Rect(0, 0, w, h);
+                job.Parts.Add(p);
+                total += qty;
+            }
+
+            List<NestPlan> plans = NestPlanner.Compare(job);
+
+            Check("方案对比：至少给出 3 个候选", plans.Count >= 3, plans.Count + " 个");
+            Check("方案对比：每个候选都排出了结果",
+                  plans.TrueForAll(p => !p.HasError),
+                  plans.Find(p => p.HasError) == null ? "" :
+                      plans.Find(p => p.HasError).Name + " : " + plans.Find(p => p.HasError).Result.Error);
+
+            // 每个候选都必须能落到板上：方案对比最容易出的错是
+            // 某个变体的覆盖参数没生效，结果看着像"排好了"但其实不合工艺
+            foreach (NestPlan p in plans)
+            {
+                if (p.HasError) continue;
+                Check("方案 " + p.Id + "「" + p.Name + "」件数完整",
+                      CountPlaced(p.Result) == total,
+                      CountPlaced(p.Result) + "/" + total);
+                VerifyGeometry(job, p.Result, "方案" + p.Id);
+            }
+
+            // 同解去重：不能出现两个张数、规格、摆法都一样的方案
+            var sigs = new List<string>();
+            foreach (NestPlan p in plans)
+                sigs.Add(p.SheetCount + "|" + p.SpecMix + "|" + Math.Round(p.Utilization * 10000));
+            Check("方案对比：无重复方案", sigs.Count == new HashSet<string>(sigs).Count,
+                  sigs.Count + " 个签名 / " + new HashSet<string>(sigs).Count + " 个不同");
+
+            // 推荐项：必须唯一，且不能是改工艺前提的那个
+            List<NestPlan> rec = plans.FindAll(p => p.IsRecommended);
+            Check("方案对比：恰好推荐 1 个", rec.Count == 1, rec.Count + " 个");
+            Check("方案对比：推荐项没有改工艺前提",
+                  rec.Count == 1 && !rec[0].ChangesCraft,
+                  rec.Count == 1 ? rec[0].Name : "-");
+
+            // 省料口径：用料面积必须不大于基准。
+            // 注意同解会被合并进基准（SameAs），此时"不差于"是平凡成立的，
+            // 不能因为查不到同名行就判失败 —— 那是在测去重实现，不是在测口径。
+            NestPlan basePlan = plans.Find(p => p.Name == "基准");
+            NestPlan areaPlan = plans.Find(p => p.Name == "省料优先");
+            bool areaMerged = basePlan != null && basePlan.SameAs.Contains("省料优先");
+
+            Check("方案对比：有基准方案", basePlan != null, "");
+            Check("方案对比：省料方案用料 <= 基准",
+                  areaMerged ||
+                  (areaPlan != null && basePlan != null && areaPlan.SheetArea <= basePlan.SheetArea + 1e-6),
+                  areaMerged ? "与基准同解" :
+                      (areaPlan == null ? "缺失" :
+                          areaPlan.SheetArea.ToString("F3") + " vs " + basePlan.SheetArea.ToString("F3") + " m²"));
+
+            // 放开旋转不应让张数变多（宁可不变，也不可能更差）
+            NestPlan rot = plans.Find(p => p.Name == "全转 90°");
+            Check("方案对比：不转时给出「全转 90°」方案", rot != null, "");
+            Check("方案对比：全转方案张数不多于基准",
+                  rot != null && basePlan != null && rot.SheetCount <= basePlan.SheetCount,
+                  rot == null ? "-" : rot.SheetCount + " vs " + basePlan.SheetCount + " 张");
+
+            // 仅某规格：规格构成必须只有那一种
+            List<NestPlan> single = plans.FindAll(p => p.Name.StartsWith("仅 "));
+            Check("方案对比：给出仅某规格的方案", single.Count > 0, single.Count + " 个");
+            bool pure = true;
+            foreach (NestPlan p in single)
+                if (!p.HasError && p.SpecMix.Contains("+")) pure = false;
+            Check("方案对比：仅某规格方案确实只用一种板", pure, "");
+
+            Console.WriteLine("    " + total + " 件 → " + plans.Count + " 个候选方案：");
+            foreach (NestPlan p in plans)
+            {
+                Console.WriteLine("      " + p.Id + " " + (p.IsRecommended ? "★" : " ") +
+                                  " " + p.Name.PadRight(12) +
+                                  p.SheetCount.ToString().PadLeft(3) + " 张  " +
+                                  p.Utilization.ToString("P1").PadLeft(6) + "  " +
+                                  p.SheetArea.ToString("F2").PadLeft(7) + " m²  " + p.SpecMix +
+                                  (p.ChangesCraft ? "  [!工艺]" : "") +
+                                  (p.SameAs.Count > 0 ? "  (同解:" + string.Join("/", p.SameAs) + ")" : ""));
+            }
         }
 
         /// <summary>几何校验：这是排样引擎唯一真正重要的正确性证明。
