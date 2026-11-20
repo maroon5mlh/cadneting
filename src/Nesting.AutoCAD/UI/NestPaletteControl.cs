@@ -386,11 +386,21 @@ namespace Nesting.AutoCAD.UI
             ResultGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "利用率", FillWeight = 18 });
             // 余料 = 还能不能再塞东西的面积。和「利用率」不是一回事：
             // 利用率按净面积算，异形件的凹陷不算浪费；余料只问"这块板还剩多大空地"
-            ResultGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "余料 m²", FillWeight = 22 });
+            ResultGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "余料 m²", FillWeight = 20 });
+            // 条料 = 右侧那条**贯穿全高**的余料有多宽。料是按条留的，不是按面积留的：
+            // 同样 2.4 m² 余料，切成三块窄缝等于废料，右边留一整条才有人要
+            DataGridViewTextBoxColumn stripCol =
+                new DataGridViewTextBoxColumn { HeaderText = "条料", FillWeight = 16 };
+            stripCol.HeaderCell.ToolTipText =
+                "右侧整条余料的宽度（mm）。\n零件不越过这条线，所以它从板底贯到板顶，" +
+                "可以直接留作下个活的长料。\n排不满的最后一张会特意把零件压到左边，" +
+                "让这条料尽可能宽。";
+            ResultGrid.Columns.Add(stripCol);
             foreach (DataGridViewColumn c in ResultGrid.Columns)
             {
                 c.SortMode = DataGridViewColumnSortMode.NotSortable;
-                if (c.HeaderText == "件数" || c.HeaderText == "利用率" || c.HeaderText == "余料 m²")
+                if (c.HeaderText == "件数" || c.HeaderText == "利用率" ||
+                    c.HeaderText == "余料 m²" || c.HeaderText == "条料")
                     c.DefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleRight;
             }
 
@@ -696,7 +706,8 @@ namespace Nesting.AutoCAD.UI
             {
                 ResultGrid.Rows.Add((s.Index + 1).ToString(), s.SheetName,
                                     s.Items.Count.ToString(), s.Utilization.ToString("P1"),
-                                    (s.FreeArea / 1e6).ToString("F2"));
+                                    (s.FreeArea / 1e6).ToString("F2"),
+                                    s.RightStripWidth >= 0.5 ? s.RightStripWidth.ToString("F0") : "—");
             }
 
             StatusLabel.ForeColor = Color.SeaGreen;

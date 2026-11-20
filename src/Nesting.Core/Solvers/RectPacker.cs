@@ -25,7 +25,17 @@ namespace Nesting.Core.Solvers
         /// <summary>最贴面积：优先选剩余面积最小的自由矩形</summary>
         BestAreaFit,
         /// <summary>左下优先：靠近板材左下角，出图好看、余料集中在右上</summary>
-        BottomLeft
+        BottomLeft,
+        /// <summary>
+        /// 靠左优先：先取最靠左的位置，同列再往下堆。
+        ///
+        /// 和 BottomLeft 的差别在"余料长什么样"：BottomLeft 是先把板底铺平
+        /// （s1 看 Y），剩下的件会被摊到整张板的宽度上，右侧余料是一条条窄缝；
+        /// LeftBottom 是先把左边堆满（s1 看 X），件集中成几列，
+        /// 右侧留出一条**贯穿全高的整条余料** —— 车间能直接留作下个活的长料。
+        /// 这条启发式只用于压实最后一张板，不参与全局择优（它不太追求利用率）。
+        /// </summary>
+        LeftBottom
     }
 
     /// <summary>待排零件实例</summary>
@@ -192,6 +202,14 @@ namespace Nesting.Core.Solvers
                 case PackHeuristic.BottomLeft:
                     s1 = fr.Y + hh;
                     s2 = fr.X;
+                    break;
+
+                case PackHeuristic.LeftBottom:
+                    // 比较"放好后的右边界"而不是左边界：尺寸固定时两者等价，
+                    // 但右边界这个口径直接就是压实的优化目标（最右件的 X 越小，
+                    // 右侧整条余料越宽），写在代码里更容易对上意图
+                    s1 = fr.X + w;
+                    s2 = fr.Y + hh;
                     break;
 
                 default: // BestShortSideFit

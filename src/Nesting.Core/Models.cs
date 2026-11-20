@@ -258,6 +258,16 @@ namespace Nesting.Core
 
         /// <summary>包围盒占板面积的比例，= 1 - FreeArea/(W*H)</summary>
         public double BboxCoverage;
+
+        /// <summary>
+        /// 右侧整条余料的宽度（mm）：从最右一件的右边界到板右边（扣掉留边）的距离。
+        ///
+        /// 这个数恒等于 SheetW - 留边 - 最右件右边界，因为没有任何件越过那条线 ——
+        /// 也就是说板右侧**永远是**一条贯穿全高的空白带，长度就是板高。
+        /// 最后一张板会被特意压实（零件靠左成列），把这个数做到最大，
+        /// 余料就能整条留下来当下个活的长料，而不是被切成几条短缝。
+        /// </summary>
+        public double RightStripWidth;
     }
 
     public sealed class NestResult

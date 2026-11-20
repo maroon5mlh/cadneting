@@ -766,12 +766,17 @@ namespace Nesting.AutoCAD
             ed.WriteMessage(string.Format("\n总利用率 {0:P2}，耗时 {1} ms（引擎 {2}）",
                 result.TotalUtilization, result.ElapsedMs, result.EngineVersion));
 
-            ed.WriteMessage("\n\n板号  规格           件数   利用率");
-            ed.WriteMessage("\n-------------------------------------");
+            ed.WriteMessage("\n\n板号  规格           件数   利用率   条料");
+            ed.WriteMessage("\n-------------------------------------------");
             foreach (SheetResult s in result.Sheets)
             {
-                ed.WriteMessage(string.Format("\n{0,3}   {1,-13} {2,5}   {3,7:P1}",
-                    s.Index + 1, s.SheetName, s.Items.Count, s.Utilization));
+                // 条料 = 右侧贯穿全高的余料宽度。末板会被特意压实成这个形状，
+                // 打出来才知道"剩下这条料到底有多宽、能不能留着用"
+                string strip = s.RightStripWidth >= 0.5
+                               ? s.RightStripWidth.ToString("F0") + "mm"
+                               : "-";
+                ed.WriteMessage(string.Format("\n{0,3}   {1,-13} {2,5}   {3,7:P1}   {4,6}",
+                    s.Index + 1, s.SheetName, s.Items.Count, s.Utilization, strip));
             }
 
             if (result.Warnings != null && result.Warnings.Count > 0)

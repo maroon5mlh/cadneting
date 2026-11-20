@@ -278,6 +278,23 @@ namespace Nesting.Core.Solvers
                 return result;
             }
 
+            // ---- 最后一张板：零件靠左压实，右侧留一条能留用的整条余料 ----
+            //
+            // 求优已经结束，这里只调最后一张的摆法，不动件集合、不动朝向，
+            // 所以张数、用料面积、利用率全部不变 —— 变的只有余料的长相：
+            // 从"几条散着的短缝"变成"右边一整条 1220×板高"。
+            //
+            // 为什么不改中间板：中间板是排满的，没有腾挪空间；而且真动了它们，
+            // 之前用来比较各方案的坐标就不再是同一个解，等于偷偷换了一个结果。
+            if (best.Count > 0)
+            {
+                int lastIdx = best.Count - 1;
+                LastSheetOptimizer.Compacted compacted =
+                    LastSheetOptimizer.TryCompact(best[lastIdx], spacing, margin);
+                if (compacted != null && compacted.Improved)
+                    best[lastIdx].Items = compacted.Items;
+            }
+
             // ---- 组织结果 ----
             double totalUsed = 0, totalSheet = 0;
             for (int bi = 0; bi < best.Count; bi++)
@@ -320,13 +337,24 @@ namespace Nesting.Core.Solvers
 
                 totalUsed += bin.UsedArea;
                 totalSheet += bin.W * bin.H;
+
+                // 右侧整条余料：没有任何件越过最右边界，所以右边那条带子必定贯穿全高
+                double maxX = 0;
+                foreach (Placement pl in sr.Items)
+                {
+                    double right = pl.X + pl.BoxW;
+                    if (right > maxX) maxX = right;
+                }
+                sr.RightStripWidth = sr.Width - margin - maxX;
+                if (sr.RightStripWidth < 0) sr.RightStripWidth = 0;
+
                 result.Sheets.Add(sr);
             }
 
             // ---- 每张板的余料：这是"还能不能再塞东西"的口径 ----
             // 用户看到"这张板空了一大片，为什么还另开一张"时问的就是这个数，
             // 与其让人拿面积去反推，不如直接给。
-            ReportFreeArea(result);
+            ReportFreeArea(result, margin);
 
             result.TotalUtilization = totalSheet <= 0 ? 0 : totalUsed / totalSheet;
             sw.Stop();
@@ -341,7 +369,7 @@ namespace Nesting.Core.Solvers
         /// 后面还开了新板"这种结果必须让人看见，因为它的常见原因不在引擎，
         /// 而在选料：混进来几个又细又长的标记块，或者留边/间距改大了。
         /// </summary>
-        private static void ReportFreeArea(NestResult result)
+        private static void ReportFreeArea(NestResult result, double margin)
         {
             const double thinThreshold = 0.45;   // 低于这个占比视为"没排满"
 
@@ -374,6 +402,21 @@ namespace Nesting.Core.Solvers
                     "想再压下一张，可以试：允许 90° 旋转（薄板无纹向限制时最有效）、" +
                     "把留边/间距调小、或在「方案对比」里换一个方案。",
                     thin.Count, string.Join("；", thin)));
+            }
+
+            // 最后一张板的整条余料单独说一句：它和"没排满"是两件事 ——
+            // 没排满说的是面积，整条余料说的是"这条料还能直接拿去用"。
+            // 操作工真正关心的是后者的宽度，因为料是按条留的，不是按面积留的。
+            if (result.Sheets.Count > 0)
+            {
+                SheetResult last = result.Sheets[result.Sheets.Count - 1];
+                if (last.RightStripWidth >= 20)
+                {
+                    result.Warnings.Add(string.Format(
+                        "最后一张板的零件已靠左摆好，右侧空出 {0:F0}×{1:F0} mm 的整条余料" +
+                        "（宽 × 板高，贯穿全高），可以直接留作下个活的长料。",
+                        last.RightStripWidth, last.Height - 2 * margin));
+                }
             }
         }
 

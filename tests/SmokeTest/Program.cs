@@ -43,6 +43,7 @@ namespace SmokeTest
             TestKeywordRotation();
             TestTextHandles();
             TestFreeArea();
+            TestLastSheetStrip();
             TestPanelSettings();
             TestInsertOrigin();
 
@@ -1166,6 +1167,96 @@ namespace SmokeTest
 
             Console.WriteLine("    " + withMark.Sheets.Count + " 张；余料 " +
                               (s0.FreeArea / 1e6).ToString("F2") + " m²");
+        }
+
+        // ------------------------------------------------------------------
+        // 末板靠左压实：右侧留一条贯穿全高的整条余料
+        // ------------------------------------------------------------------
+        private static void TestLastSheetStrip()
+        {
+            Console.WriteLine("\n-- 末板靠左压实 --");
+
+            // 一张板只装三件小料。散布着放，右侧余料会被切成几块互不相连的短缝；
+            // 靠左堆成一列后，右边是一条 800mm 宽、贯穿全高的整条料，
+            // 车间可以直接留着下个活用。
+            var job = new NestJob { BatchId = "STRIP", Unit = "mm" };
+            job.Sheets.Add(new SheetSpec { Name = "1220x2440", Width = 1220, Height = 2440 });
+            job.Settings.SpacingMm = 0;
+            job.Settings.MarginMm = 5;
+            job.Settings.AllowRotate90 = false;
+            job.Settings.RotateKeywords = new List<string>();
+
+            void AddPart(string id, double w, double h)
+            {
+                var p = new PartType
+                {
+                    Id = id, BlockName = id, Width = w, Height = h,
+                    Quantity = 1, NetArea = w * h
+                };
+                p.Outer = Rect(0, 0, w, h);
+                job.Parts.Add(p);
+            }
+            AddPart("A", 400, 900);
+            AddPart("B", 300, 700);
+            AddPart("C", 250, 500);
+
+            NestResult r = NestEngine.Solve(job);
+            Check("压实：排样无错误", r.Error == null, r.Error ?? "");
+
+            SheetResult s = r.Sheets[0];
+            double maxX = 0, maxY = 0;
+            foreach (Placement p in s.Items)
+            {
+                if (p.X + p.BoxW > maxX) maxX = p.X + p.BoxW;
+                if (p.Y + p.BoxH > maxY) maxY = p.Y + p.BoxH;
+            }
+
+            Check("压实：三件靠左堆成一列", maxX <= 411, "右边界 " + maxX.ToString("F0"));
+            Check("压实：右侧整条余料 ≥ 板宽六成", s.RightStripWidth >= 1220 * 0.6,
+                  s.RightStripWidth.ToString("F0") + " mm");
+            Check("压实：余料宽度 = 板宽 − 留边 − 最右边界",
+                  Math.Abs(s.RightStripWidth - (1220 - 5 - maxX)) < 1e-6,
+                  s.RightStripWidth.ToString("F2"));
+
+            bool told = false;
+            foreach (string w in r.Warnings)
+                if (w.Contains("整条余料")) { told = true; break; }
+            Check("压实：整条余料被点名", told, r.Warnings.Count + " 条提示");
+
+            // 压实只改摆法：几何必须仍然合法（不重叠、不越界、不侵留边）
+            VerifyGeometry(job, r, "压实");
+
+            // 多张板时只动最后一张。前几张已经排满，动它们等于偷偷换了一个解；
+            // 而且真正能腾出整条余料的只有那张没排满的末板。
+            var multi = new NestJob { BatchId = "STRIP2", Unit = "mm" };
+            multi.Sheets.Add(new SheetSpec { Name = "1220x2440", Width = 1220, Height = 2440 });
+            multi.Settings.SpacingMm = 0;
+            multi.Settings.MarginMm = 5;
+            multi.Settings.AllowRotate90 = false;
+            multi.Settings.RotateKeywords = new List<string>();
+
+            var sq = new PartType
+            {
+                Id = "Q", BlockName = "方板", Width = 600, Height = 600,
+                Quantity = 12, NetArea = 600 * 600
+            };
+            sq.Outer = Rect(0, 0, 600, 600);
+            multi.Parts.Add(sq);
+
+            NestResult m = NestEngine.Solve(multi);
+            Check("多板：12 件 600x600 排成 2 张", m.Sheets.Count == 2,
+                  m.Sheets.Count + " 张，件数 " +
+                  string.Join("+", m.Sheets.ConvertAll(x => x.Items.Count)));
+            Check("多板：前面一张仍是 8 件（没被重排）", m.Sheets[0].Items.Count == 8,
+                  m.Sheets[0].Items.Count + " 件");
+            Check("多板：末板 4 件改成一列，右侧余料 ≥ 600",
+                  m.Sheets[1].RightStripWidth >= 600,
+                  m.Sheets[1].RightStripWidth.ToString("F0") + " mm");
+            VerifyGeometry(multi, m, "多板压实");
+
+            Console.WriteLine("    单板占用 " + maxX.ToString("F0") + "×" + maxY.ToString("F0") +
+                              "，右侧整条余料 " + s.RightStripWidth.ToString("F0") + " mm；" +
+                              "多板末板余料条 " + m.Sheets[1].RightStripWidth.ToString("F0") + " mm");
         }
 
         private static void TestPanelSettings()
