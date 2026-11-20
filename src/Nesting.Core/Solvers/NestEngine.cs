@@ -74,6 +74,18 @@ namespace Nesting.Core.Solvers
             {
                 int qty = p.Quantity > 0 ? p.Quantity : 1;
 
+                // 辅助块（折弯标记、压线、孔位标记）直接不参与排样。
+                // 它们往往又细又长，按面积算很小，但装箱时必须占掉一整列高度，
+                // 代价是整整一张板 —— 一个 29x2075 的标记能把 4 张的料顶成 5 张。
+                if (RotationPolicy.IsExcluded(p.BlockName, job.Settings.ExcludeKeywords))
+                {
+                    string key = string.IsNullOrEmpty(p.BlockName) ? p.Id : p.BlockName;
+                    int had;
+                    result.Excluded.TryGetValue(key, out had);
+                    result.Excluded[key] = had + qty;
+                    continue;
+                }
+
                 // 关键字白名单：块名含「顶包边/底框/中横框」的件即使全局关掉旋转也可转
                 bool canRotate = RotationPolicy.CanRotate(
                     globalRotate, p.AllowRotate90, p.BlockName, job.Settings.RotateKeywords);
@@ -92,6 +104,30 @@ namespace Nesting.Core.Solvers
                         CanRotate = canRotate
                     });
                 }
+            }
+
+            // 排掉之后要让人看见：少了零件却悄悄少排，比排得不好严重得多
+            if (result.Excluded.Count > 0)
+            {
+                int n = 0;
+                var names = new List<string>();
+                foreach (KeyValuePair<string, int> kv in result.Excluded)
+                {
+                    n += kv.Value;
+                    names.Add(kv.Key + "×" + kv.Value);
+                }
+                names.Sort(StringComparer.Ordinal);
+                result.Warnings.Add(string.Format(
+                    "按「排除块」跳过了 {0} 个块、共 {1} 件：{2}。这些块没有参与排样，也不会被移动。",
+                    result.Excluded.Count, n, string.Join("、", names)));
+            }
+
+            if (items.Count == 0)
+            {
+                result.Error = "排除之后没有剩下任何零件，请检查「排除块」里的关键字。";
+                sw.Stop();
+                result.ElapsedMs = sw.ElapsedMilliseconds;
+                return result;
             }
 
             ClassifyParts(job, result);
@@ -261,7 +297,9 @@ namespace Nesting.Core.Solvers
                         SheetIndex = bi,
                         X = it.Px,
                         Y = it.Py,
-                        RotationDeg = it.Rotated ? 90 : 0
+                        RotationDeg = it.Rotated ? 90 : 0,
+                        BoxW = it.W,
+                        BoxH = it.H
                     };
 
                     // 把这一件的跟随文字句柄一并带出去，回写时和块一起变换
@@ -276,10 +314,57 @@ namespace Nesting.Core.Solvers
                 result.Sheets.Add(sr);
             }
 
+            // ---- 每张板的余料：这是"还能不能再塞东西"的口径 ----
+            // 用户看到"这张板空了一大片，为什么还另开一张"时问的就是这个数，
+            // 与其让人拿面积去反推，不如直接给。
+            ReportFreeArea(result);
+
             result.TotalUtilization = totalSheet <= 0 ? 0 : totalUsed / totalSheet;
             sw.Stop();
             result.ElapsedMs = sw.ElapsedMilliseconds;
             return result;
+        }
+
+        /// <summary>
+        /// 算每张板的包围盒余料，并把"明显没排满"的板报出来。
+        ///
+        /// 报告的目的不是抱怨引擎：排不下就是排不下。但"某张板只用了三成、
+        /// 后面还开了新板"这种结果必须让人看见，因为它的常见原因不在引擎，
+        /// 而在选料：混进来几个又细又长的标记块，或者留边/间距改大了。
+        /// </summary>
+        private static void ReportFreeArea(NestResult result)
+        {
+            const double thinThreshold = 0.45;   // 低于这个占比视为"没排满"
+
+            var thin = new List<string>();
+            foreach (SheetResult s in result.Sheets)
+            {
+                double sheetArea = s.Width * s.Height;
+
+                double box = 0;
+                foreach (Placement pl in s.Items) box += pl.BoxW * pl.BoxH;
+
+                s.FreeArea = sheetArea > box ? sheetArea - box : 0;
+                s.BboxCoverage = sheetArea <= 0 ? 0 : box / sheetArea;
+
+                if (s.BboxCoverage < thinThreshold)
+                {
+                    thin.Add(string.Format("第 {0} 张（{1}，{2} 件，余料 {3:F2} m²）",
+                        s.Index + 1, s.SheetName, s.Items.Count, s.FreeArea / 1e6));
+                }
+            }
+
+            if (thin.Count > 0)
+            {
+                // 措辞不能是"最后一张空着正常"：这批料恰恰是"最后一张只放 2 件"
+                // 顶出来的一张板，说成正常就把问题盖掉了
+                result.Warnings.Add(string.Format(
+                    "{0} 张板余料偏大：{1}。中间板出现大余料、或最后一张只放下很少几件时，" +
+                    "先检查是不是把折弯标记 / 压线这类辅助块当零件选了" +
+                    "（面板「排除块」里填块名关键字即可，这类块又细又长，占一整列却几乎不占面积）；" +
+                    "留边、间距设得偏大也会有同样表现。",
+                    thin.Count, string.Join("；", thin)));
+            }
         }
 
         private static double MaxSide(PackItem it)

@@ -42,6 +42,7 @@ namespace SmokeTest
             TestMargin();
             TestKeywordRotation();
             TestTextHandles();
+            TestExcludeAndFreeArea();
             TestPanelSettings();
             TestInsertOrigin();
 
@@ -1016,6 +1017,118 @@ namespace SmokeTest
         // ------------------------------------------------------------------
         // 面板参数持久化
         // ------------------------------------------------------------------
+        // ------------------------------------------------------------------
+        // 排除辅助块 + 每张板余料
+        //
+        // 现场问题：图里混着折弯标记块（29x2075 这种又细又长的），
+        // 面积很小但装箱时必须占掉一整列高度，实测能把 4 张板的料顶成 5 张，
+        // 而多出来的那张板上只放得下两件小料 —— 用户看到的就是"板没排满就换下一张"。
+        // ------------------------------------------------------------------
+        private static void TestExcludeAndFreeArea()
+        {
+            Console.WriteLine("\n-- 排除辅助块 / 余料 --");
+
+            NestJob Build(bool exclude)
+            {
+                var job = new NestJob { BatchId = "EXCL", Unit = "mm" };
+                job.Sheets.Add(new SheetSpec { Name = "1000x2000", Width = 1000, Height = 2000 });
+                job.Settings.SpacingMm = 0;
+                job.Settings.MarginMm = 0;
+                job.Settings.AllowRotate90 = false;
+
+                var a = new PartType
+                {
+                    Id = "A", BlockName = "面板", Width = 500, Height = 500,
+                    Quantity = 4, NetArea = 250000
+                };
+                a.Outer = Rect(0, 0, 500, 500);
+
+                // 折弯标记：又细又长，面积 38,000，装箱却要一整列
+                var mark = new PartType
+                {
+                    Id = "M", BlockName = "BEND_MARK_BLOCK_1", Width = 20, Height = 1900,
+                    Quantity = 1, NetArea = 38000
+                };
+                mark.Outer = Rect(0, 0, 20, 1900);
+
+                job.Parts.Add(a);
+                job.Parts.Add(mark);
+                if (exclude) job.Settings.ExcludeKeywords = new List<string> { "BEND_MARK" };
+                return job;
+            }
+
+            NestResult withMark = NestEngine.Solve(Build(false));
+            NestResult excluded = NestEngine.Solve(Build(true));
+
+            Check("不排除：标记块参与排样", CountPlaced(withMark) == 5, CountPlaced(withMark) + "/5 件");
+            Check("不排除：没有排除记录", withMark.Excluded.Count == 0, withMark.Excluded.Count + " 条");
+
+            Check("排除：标记块不参与", CountPlaced(excluded) == 4, CountPlaced(excluded) + "/4 件");
+            Check("排除：记录被跳过的块", excluded.Excluded.Count == 1,
+                  string.Join("、", excluded.Excluded.Keys));
+            Check("排除：跳过件数正确",
+                  excluded.Excluded.Count == 1 && excluded.Excluded.ContainsValue(1),
+                  excluded.Excluded.Count == 1 ? excluded.Excluded["BEND_MARK_BLOCK_1"].ToString() : "-");
+
+            bool told = false;
+            foreach (string w in excluded.Warnings)
+                if (w.Contains("排除块") && w.Contains("BEND_MARK")) { told = true; break; }
+            Check("排除：结果里明说跳过了谁", told, "");
+
+            // 余料：500x500 x4 铺满 1000x2000 的一半
+            SheetResult s0 = withMark.Sheets[0];
+            Check("余料：包围盒占比约 50%", Math.Abs(s0.BboxCoverage - 0.5) < 0.05,
+                  s0.BboxCoverage.ToString("P1"));
+            Check("余料：面积算对",
+                  Math.Abs(s0.FreeArea - (1000 * 2000 - 4 * 250000 - 20 * 1900)) < 1.0,
+                  s0.FreeArea.ToString("F0") + " mm²");
+
+            // 一张板只放一件小料 → 必须被点名，否则"为什么另开一张板"就无从解释
+            var thinJob = new NestJob { BatchId = "THIN", Unit = "mm" };
+            thinJob.Sheets.Add(new SheetSpec { Name = "1000x2000", Width = 1000, Height = 2000 });
+            thinJob.Settings.MarginMm = 0;
+            var one = new PartType
+            {
+                Id = "A", BlockName = "面板", Width = 500, Height = 500,
+                Quantity = 1, NetArea = 250000
+            };
+            one.Outer = Rect(0, 0, 500, 500);
+            thinJob.Parts.Add(one);
+
+            NestResult thin = NestEngine.Solve(thinJob);
+            bool thinTold = false;
+            foreach (string w in thin.Warnings)
+                if (w.Contains("余料偏大")) { thinTold = true; break; }
+            Check("余料偏大的板会被点名", thinTold, thin.Warnings.Count + " 条提示");
+
+            // 旋转件的落位尺寸要跟着换，否则余料算的是原始尺寸，越算越偏
+            var job2 = new NestJob { BatchId = "ROT", Unit = "mm" };
+            job2.Sheets.Add(new SheetSpec { Name = "1000x1000", Width = 1000, Height = 1000 });
+            job2.Settings.MarginMm = 0;
+            job2.Settings.AllowRotate90 = true;
+            var tall = new PartType
+            {
+                Id = "T", BlockName = "竖条", Width = 300, Height = 900,
+                Quantity = 1, NetArea = 270000
+            };
+            tall.Outer = Rect(0, 0, 300, 900);
+            job2.Parts.Add(tall);
+            NestResult r2 = NestEngine.Solve(job2);
+
+            Placement p0 = r2.Sheets[0].Items[0];
+            double w2 = p0.BoxW, h2 = p0.BoxH;
+            Check("落位尺寸与旋转一致",
+                  (Math.Abs(w2 - 300) < 1e-6 && Math.Abs(h2 - 900) < 1e-6) ||
+                  (Math.Abs(w2 - 900) < 1e-6 && Math.Abs(h2 - 300) < 1e-6),
+                  w2.ToString("F0") + " x " + h2.ToString("F0"));
+            Check("落位尺寸与 RotationDeg 对得上",
+                  (p0.RotationDeg == 90) == (Math.Abs(w2 - tall.Height) < 1e-6),
+                  "rot " + p0.RotationDeg);
+
+            Console.WriteLine("    不排除 " + withMark.Sheets.Count + " 张 / 排除后 " +
+                              excluded.Sheets.Count + " 张；余料 " + (s0.FreeArea / 1e6).ToString("F2") + " m²");
+        }
+
         private static void TestPanelSettings()
         {
             Console.WriteLine("\n-- 面板参数持久化 --");
@@ -1042,7 +1155,8 @@ namespace SmokeTest
                     AllowRotate90 = false,
                     FollowText = true,
                     SheetPreferLarge = false,   // 关掉也要能原样存回来
-                    Keywords = "铰包边、中横板"
+                    Keywords = "铰包边、中横板",
+                    ExcludeKeywords = "BEND_MARK、标记"
                 };
                 custom.Sheets.Add(new PanelSheetRow { Use = true, Name = "1220x2250", W = 1220, H = 2250 });
                 custom.Sheets.Add(new PanelSheetRow { Use = false, Name = "停用规格", W = 900, H = 1800 });
@@ -1062,6 +1176,8 @@ namespace SmokeTest
                           back.Sheets.Count == 2 && !back.Sheets[1].Use,
                           back.Sheets.Count == 2 ? back.Sheets[1].Use.ToString() : "-");
                     Check("往返：中文关键字不乱码", back.Keywords == "铰包边、中横板", back.Keywords ?? "");
+                    Check("往返：排除块关键字", back.ExcludeKeywords == "BEND_MARK、标记",
+                          back.ExcludeKeywords ?? "");
                 }
 
                 // 损坏文件必须退化成默认值，而不是抛异常把面板干掉

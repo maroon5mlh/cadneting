@@ -46,11 +46,21 @@ namespace Nesting.AutoCAD.UI
                     _palette.Style = PaletteSetStyles.ShowPropertiesMenu
                                    | PaletteSetStyles.ShowAutoHideButton
                                    | PaletteSetStyles.ShowCloseButton;
-                    // 高度从 560 提到 680：多了「方案对比」一块（标题 + 4~5 行表格），
-                    // 不放高就会把下方结果表挤成一条缝，看起来像"结果没出来"
-                    _palette.MinimumSize = new Size(380, 680);
+                    // 高度 740：多了「排除块」一行，另外结果表有 96px 的下限，
+                    // 面板再矮就会把结果表挤掉（那正是"下方一大片空白"的由来）
+                    _palette.MinimumSize = new Size(380, 740);
                     _palette.DockEnabled = DockSides.Left | DockSides.Right;
                     _palette.Add("排样", _control);
+
+                    // 停靠/还原时 AutoCAD 偶尔不给内容控件发 resize，
+                    // 表现是控件只占上半截、下面留一大片空白（结果表被挤成 1px）。
+                    // 这里自己补一次：重新 Dock 一遍 + 强制布局，成本几乎为零。
+                    _palette.SizeChanged += (s, e) =>
+                    {
+                        if (_control == null) return;
+                        _control.Dock = DockStyle.Fill;
+                        _control.PerformLayout();
+                    };
                 }
 
                 _palette.Visible = true;

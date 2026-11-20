@@ -24,6 +24,7 @@ namespace Nesting.AutoCAD.UI
         public CheckBox FollowText;
         public CheckBox PreferLargeCheck;
         public TextBox KeywordBox;
+        public TextBox ExcludeBox;
         public Button RunButton;
         public DataGridView PlanGrid;
         public Button ApplyPlanButton;
@@ -135,7 +136,7 @@ namespace Nesting.AutoCAD.UI
             {
                 Dock = DockStyle.Fill,
                 ColumnCount = 2,
-                RowCount = 4,
+                RowCount = 5,
                 AutoSize = true,
                 AutoSizeMode = AutoSizeMode.GrowAndShrink,
                 Margin = new Padding(0, 2, 0, 8)
@@ -279,6 +280,29 @@ namespace Nesting.AutoCAD.UI
             paramGrid.Controls.Add(kwLabel, 0, 3);
             paramGrid.Controls.Add(KeywordBox, 1, 3);
 
+            // 排除块：折弯标记 / 压线 / 孔位标记这类辅助块不该参与装箱。
+            // 它们面积很小，但装箱时要占掉一整列高度，一个 29x2075 的标记
+            // 就能把 4 张板的料顶成 5 张 —— 这个框是给这种块留的出口。
+            var exLabel = new Label
+            {
+                Text = "排除块",
+                AutoSize = true,
+                Margin = new Padding(0, 8, 4, 0)
+            };
+            ExcludeBox = new TextBox
+            {
+                Text = "",
+                Dock = DockStyle.Fill,
+                Margin = new Padding(0, 5, 0, 0)
+            };
+            _tip.SetToolTip(ExcludeBox,
+                "块名包含这些字的块不参与排样，也不会被移动。\n" +
+                "用来排除折弯标记、压线、孔位标记这类辅助块（例如填 BEND_MARK）。\n" +
+                "留空 = 全部参与；用顿号、逗号或空格分隔多个关键字。");
+
+            paramGrid.Controls.Add(exLabel, 0, 4);
+            paramGrid.Controls.Add(ExcludeBox, 1, 4);
+
             // ---- 主按钮 ----
             RunButton = new Button
             {
@@ -363,6 +387,9 @@ namespace Nesting.AutoCAD.UI
             ResultGrid = new DataGridView
             {
                 Dock = DockStyle.Fill,
+                // 这块是"每张板还剩多少"的唯一入口，被挤成一条缝等于没有：
+                // 表头 + 3 行是下限，面板再矮也不再压缩它（宁可整体出现滚动条）
+                MinimumSize = new Size(0, 96),
                 AllowUserToAddRows = false,
                 AllowUserToDeleteRows = false,
                 AllowUserToResizeRows = false,
@@ -376,21 +403,31 @@ namespace Nesting.AutoCAD.UI
                 ColumnHeadersHeight = 26
             };
             ResultGrid.RowsDefaultCellStyle.Font = SystemFonts.MessageBoxFont;
-            ResultGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "板号", FillWeight = 18 });
-            ResultGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "规格", FillWeight = 40 });
-            ResultGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "件数", FillWeight = 18 });
-            ResultGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "利用率", FillWeight = 24 });
+            ResultGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "板号", FillWeight = 14 });
+            ResultGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "规格", FillWeight = 32 });
+            ResultGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "件数", FillWeight = 14 });
+            ResultGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "利用率", FillWeight = 18 });
+            // 余料 = 还能不能再塞东西的面积。和「利用率」不是一回事：
+            // 利用率按净面积算，异形件的凹陷不算浪费；余料只问"这块板还剩多大空地"
+            ResultGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "余料 m²", FillWeight = 22 });
             foreach (DataGridViewColumn c in ResultGrid.Columns)
+            {
                 c.SortMode = DataGridViewColumnSortMode.NotSortable;
+                if (c.HeaderText == "件数" || c.HeaderText == "利用率" || c.HeaderText == "余料 m²")
+                    c.DefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleRight;
+            }
 
             StatusLabel = new Label
             {
                 Dock = DockStyle.Fill,
                 AutoSize = false,
-                Height = 34,
+                Height = 40,
                 Text = "未排样",
                 ForeColor = SystemColors.GrayText,
-                TextAlign = ContentAlignment.MiddleLeft
+                TextAlign = ContentAlignment.MiddleLeft,
+                // 状态行会换到两行（件数/张数/利用率 +「｜方案说明」），
+                // 宁可截断也不要让第二行压到结果表上
+                AutoEllipsis = true
             };
 
             root.Controls.Add(sheetTitle, 0, 0);
@@ -402,8 +439,11 @@ namespace Nesting.AutoCAD.UI
             root.Controls.Add(planTitleRow, 0, 6);
             root.Controls.Add(PlanGrid, 0, 7);
             root.Controls.Add(resTitle, 0, 8);
-            root.Controls.Add(ResultGrid, 0, 9);
-            root.Controls.Add(StatusLabel, 0, 10);
+            // 状态行放在结果表**上面**（当表的小标题用），不放在最底下：
+            // 结果表是 Percent 行，面板被压矮时它会溢出 —— 放在末尾只会被裁掉一截，
+            // 而放在状态行上面就会把它压住，看起来像"表格没出来"。
+            root.Controls.Add(StatusLabel, 0, 9);
+            root.Controls.Add(ResultGrid, 0, 10);
 
             root.RowStyles.Add(new RowStyle(SizeType.AutoSize));      // 0 title
             _sheetRowStyle = new RowStyle(SizeType.Absolute, 104);    // 1 sheet grid（行数变了要跟着调）
@@ -415,8 +455,8 @@ namespace Nesting.AutoCAD.UI
             root.RowStyles.Add(new RowStyle(SizeType.AutoSize));      // 6 plan title
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 112)); // 7 plan grid
             root.RowStyles.Add(new RowStyle(SizeType.AutoSize));      // 8 title
-            root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));  // 9 results
-            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));  // 10 status
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));  // 9 status
+            root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));  // 10 results
 
             Controls.Add(root);
 
@@ -454,6 +494,7 @@ namespace Nesting.AutoCAD.UI
             FollowText.CheckedChanged += OnAnySettingChanged;
             PreferLargeCheck.CheckedChanged += OnAnySettingChanged;
             KeywordBox.Leave += OnAnySettingChanged;
+            ExcludeBox.Leave += OnAnySettingChanged;
 
             // 勾选框必须显式提交，否则 CellValueChanged 要等离开单元格才触发，
             // 用户勾完直接关 CAD 就会丢
@@ -490,7 +531,8 @@ namespace Nesting.AutoCAD.UI
                 AllowRotate90 = RotateCheck.Checked,
                 FollowText = FollowText.Checked,
                 SheetPreferLarge = PreferLargeCheck.Checked,
-                Keywords = KeywordBox.Text ?? ""
+                Keywords = KeywordBox.Text ?? "",
+                ExcludeKeywords = ExcludeBox.Text ?? ""
             };
 
             foreach (DataGridViewRow row in SheetGrid.Rows)
@@ -544,6 +586,7 @@ namespace Nesting.AutoCAD.UI
                 PreferLargeCheck.Checked = saved.SheetPreferLarge;
 
                 if (!string.IsNullOrWhiteSpace(saved.Keywords)) KeywordBox.Text = saved.Keywords;
+                if (!string.IsNullOrWhiteSpace(saved.ExcludeKeywords)) ExcludeBox.Text = saved.ExcludeKeywords;
             }
             finally
             {
@@ -600,19 +643,31 @@ namespace Nesting.AutoCAD.UI
             };
 
             string raw = KeywordBox.Text ?? "";
+            var words = SplitWords(raw);
+
+            // 面板清空 = 用回默认关键字。这里不做"空表示一个都不强制"：
+            // 那样用户误删一行就会静默丢掉几个点的利用率，很难联想到原因。
+            if (words.Count > 0) st.RotateKeywords = words;
+
+            // 排除块是反过来的：留空就是"一个都不排除"，这是默认状态
+            st.ExcludeKeywords = SplitWords(ExcludeBox.Text);
+
+            return st;
+        }
+
+        /// <summary>把「A、B，C D」这类输入拆成关键字列表</summary>
+        private static List<string> SplitWords(string raw)
+        {
             var words = new List<string>();
+            if (string.IsNullOrEmpty(raw)) return words;
+
             foreach (string s in raw.Split(new[] { '、', ',', '，', ';', '；', ' ', '\t' },
                                            StringSplitOptions.RemoveEmptyEntries))
             {
                 string t = s.Trim();
                 if (t.Length > 0) words.Add(t);
             }
-
-            // 面板清空 = 用回默认关键字。这里不做"空表示一个都不强制"：
-            // 那样用户误删一行就会静默丢掉几个点的利用率，很难联想到原因。
-            if (words.Count > 0) st.RotateKeywords = words;
-
-            return st;
+            return words;
         }
 
         /// <summary>读取面板上的板材规格</summary>
@@ -669,7 +724,8 @@ namespace Nesting.AutoCAD.UI
             foreach (SheetResult s in result.Sheets)
             {
                 ResultGrid.Rows.Add((s.Index + 1).ToString(), s.SheetName,
-                                    s.Items.Count.ToString(), s.Utilization.ToString("P1"));
+                                    s.Items.Count.ToString(), s.Utilization.ToString("P1"),
+                                    (s.FreeArea / 1e6).ToString("F2"));
             }
 
             StatusLabel.ForeColor = Color.SeaGreen;

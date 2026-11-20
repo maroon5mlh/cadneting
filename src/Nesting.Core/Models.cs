@@ -195,6 +195,17 @@ namespace Nesting.Core
         /// </summary>
         public bool SheetPreferLarge = true;
 
+        /// <summary>
+        /// 块名命中这些关键字的零件**不参与排样**。
+        ///
+        /// 用途：图里除了要切的零件，还常有折弯标记、压线、拉手孔位这类辅助块。
+        /// 它们尺寸不大但经常"一柱擎天"（例如 29x2075 的折弯标记），
+        /// 排样时只能占掉一整列高度，代价是整整一张板 —— 实测一批 26 件的料
+        /// 因为混进 3 个折弯标记块，从 4 张变成 5 张，最后一张只放了 2 件小料。
+        /// 这类块不该按面积参与装箱，交给人指定比让引擎猜安全。
+        /// </summary>
+        public List<string> ExcludeKeywords = new List<string>();
+
         /// <summary>优化目标：sheets=最少张数，cost=最低成本，area=最高利用率</summary>
         public string Objective = "sheets";
 
@@ -226,6 +237,13 @@ namespace Nesting.Core
         /// <summary>额外旋转角，0 或 90</summary>
         public double RotationDeg;
 
+        /// <summary>
+        /// 落位后的包围盒宽高（旋转 90° 的件 W/H 会互换）。
+        /// 余料统计和"这张板还能不能塞"都按它算 —— 原始品种尺寸对旋转件是错的。
+        /// </summary>
+        public double BoxW;
+        public double BoxH;
+
         /// <summary>与这块零件一起移动的文字实体句柄（块旁的标注文字）</summary>
         public List<string> TextHandles = new List<string>();
     }
@@ -239,6 +257,18 @@ namespace Nesting.Core
         public double UsedArea;
         public double Utilization;
         public List<Placement> Items = new List<Placement>();
+
+        /// <summary>
+        /// 这张板上没被包围盒占掉的面积（mm²）。
+        ///
+        /// 和 Utilization 的区别：Utilization 算的是"净面积/板面积"，异形件的凹陷不算浪费；
+        /// 而 FreeArea 只关心**还能不能再塞东西**。用户看到"这张板空了一大片"
+        /// 问的其实是 FreeArea —— 所以结果表里直接给这个数，不用他去反推。
+        /// </summary>
+        public double FreeArea;
+
+        /// <summary>包围盒占板面积的比例，= 1 - FreeArea/(W*H)</summary>
+        public double BboxCoverage;
     }
 
     public sealed class NestResult
@@ -251,6 +281,12 @@ namespace Nesting.Core
 
         /// <summary>不影响出结果、但需要让用户知道的提示（异形件、近似处理等）</summary>
         public List<string> Warnings = new List<string>();
+
+        /// <summary>
+        /// 按「排除块」关键字跳过的品种：块名 → 件数。
+        /// 一定要报出来 —— 排样结果少了东西却无人知晓，比排得不好严重得多。
+        /// </summary>
+        public Dictionary<string, int> Excluded = new Dictionary<string, int>();
     }
 
     /// <summary>

@@ -43,6 +43,28 @@ namespace Nesting.Core
         }
 
         /// <summary>
+        /// 块名是否命中「排除」关键字（折弯标记、压线、孔位标记这类辅助块）。
+        /// 与旋转关键字分开匹配：旋转是"允许转"，排除是"根本不参与排样"，
+        /// 混在一个列表里迟早会有人填错地方。
+        /// </summary>
+        public static bool IsExcluded(string blockName, IList<string> keywords)
+        {
+            if (string.IsNullOrEmpty(blockName) || keywords == null || keywords.Count == 0)
+                return false;
+
+            for (int i = 0; i < keywords.Count; i++)
+            {
+                string k = keywords[i];
+                if (k == null) continue;
+                k = k.Trim();
+                if (k.Length == 0) continue;
+
+                if (blockName.IndexOf(k, StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            }
+            return false;
+        }
+
+        /// <summary>
         /// 综合判定：零件自身允许 && (全局开关 || 命中关键字)。
         /// partAllow 为 false 时直接否决，关键字也救不回来 —— 纹向是物理约束。
         /// </summary>
