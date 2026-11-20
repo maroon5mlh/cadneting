@@ -74,18 +74,6 @@ namespace Nesting.Core.Solvers
             {
                 int qty = p.Quantity > 0 ? p.Quantity : 1;
 
-                // 辅助块（折弯标记、压线、孔位标记）直接不参与排样。
-                // 它们往往又细又长，按面积算很小，但装箱时必须占掉一整列高度，
-                // 代价是整整一张板 —— 一个 29x2075 的标记能把 4 张的料顶成 5 张。
-                if (RotationPolicy.IsExcluded(p.BlockName, job.Settings.ExcludeKeywords))
-                {
-                    string key = string.IsNullOrEmpty(p.BlockName) ? p.Id : p.BlockName;
-                    int had;
-                    result.Excluded.TryGetValue(key, out had);
-                    result.Excluded[key] = had + qty;
-                    continue;
-                }
-
                 // 关键字白名单：块名含「顶包边/底框/中横框」的件即使全局关掉旋转也可转
                 bool canRotate = RotationPolicy.CanRotate(
                     globalRotate, p.AllowRotate90, p.BlockName, job.Settings.RotateKeywords);
@@ -106,25 +94,9 @@ namespace Nesting.Core.Solvers
                 }
             }
 
-            // 排掉之后要让人看见：少了零件却悄悄少排，比排得不好严重得多
-            if (result.Excluded.Count > 0)
-            {
-                int n = 0;
-                var names = new List<string>();
-                foreach (KeyValuePair<string, int> kv in result.Excluded)
-                {
-                    n += kv.Value;
-                    names.Add(kv.Key + "×" + kv.Value);
-                }
-                names.Sort(StringComparer.Ordinal);
-                result.Warnings.Add(string.Format(
-                    "按「排除块」跳过了 {0} 个块、共 {1} 件：{2}。这些块没有参与排样，也不会被移动。",
-                    result.Excluded.Count, n, string.Join("、", names)));
-            }
-
             if (items.Count == 0)
             {
-                result.Error = "排除之后没有剩下任何零件，请检查「排除块」里的关键字。";
+                result.Error = "任务里没有可排的零件（数量都是 0）。";
                 sw.Stop();
                 result.ElapsedMs = sw.ElapsedMilliseconds;
                 return result;
@@ -151,10 +123,8 @@ namespace Nesting.Core.Solvers
                 }
             }
 
-            // ---- 板材顺序：默认大板优先，开新板取「能装下的最大规格」 ----
-            // 车间习惯是先切整张大板：大板装得多、张数少，剩下的超幅件才用小板。
-            // 关掉这个开关就退化成「能装下的最小板」（省料，但张数多，
-            // 而且勾了 2250 之后 2440/3050 可能一张都开不出来）。
+            // ---- 板材顺序 ----
+            // 规格集合始终按面积升序保存，具体开哪一张由「还需要多大的板」决定（见 Pack）。
             // 方案对比可限定规格集合（"库存只有 1220x2440"这种现实约束）
             var sheetSource = (opt.RestrictSheets != null && opt.RestrictSheets.Count > 0)
                               ? opt.RestrictSheets : job.Sheets;
@@ -162,20 +132,59 @@ namespace Nesting.Core.Solvers
             specs.Sort((a, b) => (a.Width * a.Height).CompareTo(b.Width * b.Height));
 
             bool preferLarge = opt.SheetPreferLargeOverride ?? job.Settings.SheetPreferLarge;
-            if (preferLarge) specs.Reverse();
 
             double spacing = job.Settings.SpacingMm;
             double margin = job.Settings.MarginMm > 0 ? job.Settings.MarginMm : 0;
 
-            var orderings = new List<Comparison<PackItem>>
+            // 每件先算出「能装下它的最小规格板」。开新板时看的是剩余件里最难装的那个，
+            // 所以必须提前算：3050 只在大件真的需要时才会被打开。
+            foreach (PackItem it in items)
             {
-                (a, b) => b.W0 * b.H0 != a.W0 * a.H0
+                it.RequiredSpec = MinFittingSpec(it, specs, margin);
+                if (it.RequiredSpec != null) continue;
+
+                // 提前点名是哪件超幅：比"所有尝试都失败"的笼统报错有用得多，
+                // 用户要的是"加个什么规格"或"少留多少边"，不是"排不出来"
+                SheetSpec biggest = specs[specs.Count - 1];
+                string name = string.IsNullOrEmpty(it.Part.BlockName) ? it.Part.Id : it.Part.BlockName;
+                result.Error = string.Format(
+                    "零件「{0}」{1:F0}×{2:F0} 放不进任何勾选的板材：最大的 {3} 扣掉留边 {4:F0}mm 后" +
+                    "只剩 {5:F0}×{6:F0}。请加一个更大的规格，或把留边调小。",
+                    name, it.W0, it.H0, biggest.Name, margin,
+                    biggest.Width - 2 * margin, biggest.Height - 2 * margin);
+                sw.Stop();
+                result.ElapsedMs = sw.ElapsedMilliseconds;
+                return result;
+            }
+
+            static double ReqArea(PackItem x)
+            {
+                return x.RequiredSpec == null ? 0 : x.RequiredSpec.Width * x.RequiredSpec.Height;
+            }
+
+            var orderings = new List<Comparison<PackItem>>();
+
+            if (preferLarge)
+            {
+                // 必须用大板的件排最前：先让它们占住大板，剩下的空隙由小件填满。
+                // 如果没有这一条，大件可能排在最后，前面的小件会把大板开出来却填不满，
+                // 最后大件再单独占一张 —— 正是"大板没排满就排下一张"的观感。
+                orderings.Add((a, b) =>
+                {
+                    double ra = ReqArea(a), rb = ReqArea(b);
+                    if (Math.Abs(rb - ra) > 1e-6) return rb.CompareTo(ra);
+                    return (b.W0 * b.H0).CompareTo(a.W0 * a.H0);
+                });
+            }
+
+            orderings.Add((a, b) => b.W0 * b.H0 != a.W0 * a.H0
                           ? (b.W0 * b.H0).CompareTo(a.W0 * a.H0)          // 面积降序
-                          : b.Seq.CompareTo(a.Seq),
-                (a, b) => MaxSide(b).CompareTo(MaxSide(a)),                   // 长边降序
-                (a, b) => (b.W0 + b.H0).CompareTo(a.W0 + a.H0),               // 周长降序
-                (a, b) => b.H0.CompareTo(a.H0)                                // 高度降序
-            };
+                          : b.Seq.CompareTo(a.Seq));
+            orderings.Add((a, b) => MaxSide(b).CompareTo(MaxSide(a)));         // 长边降序
+            orderings.Add((a, b) => (b.W0 + b.H0).CompareTo(a.W0 + a.H0));     // 周长降序
+            orderings.Add((a, b) => b.H0.CompareTo(a.H0));                     // 高度降序
+            orderings.Add((a, b) => b.W0.CompareTo(a.W0));                     // 宽度降序
+            orderings.Add((a, b) => a.H0.CompareTo(b.H0));                     // 高度升序（矮件先占平层）
             var heuristics = new[]
             {
                 PackHeuristic.BestShortSideFit,
@@ -222,7 +231,7 @@ namespace Nesting.Core.Solvers
 
                         var list = new List<PackItem>(items);
                         list.Sort(cmp);
-                        List<PackBin> bins = Pack(list, specSet, spacing, margin, h, result);
+                        List<PackBin> bins = Pack(list, specSet, spacing, margin, h, preferLarge, result);
 
                         if (bins == null) continue;
 
@@ -357,12 +366,13 @@ namespace Nesting.Core.Solvers
             if (thin.Count > 0)
             {
                 // 措辞不能是"最后一张空着正常"：这批料恰恰是"最后一张只放 2 件"
-                // 顶出来的一张板，说成正常就把问题盖掉了
+                // 顶出来的一张板，说成正常就把问题盖掉了。
+                // 也要说清"余料大 ≠ 还能塞"：剩余空间常是窄条，面积够而形状不匹配。
                 result.Warnings.Add(string.Format(
-                    "{0} 张板余料偏大：{1}。中间板出现大余料、或最后一张只放下很少几件时，" +
-                    "先检查是不是把折弯标记 / 压线这类辅助块当零件选了" +
-                    "（面板「排除块」里填块名关键字即可，这类块又细又长，占一整列却几乎不占面积）；" +
-                    "留边、间距设得偏大也会有同样表现。",
+                    "{0} 张板余料偏大：{1}。余料按包围盒算，实际多半是窄条 —— " +
+                    "件塞不进去不是因为面积不够，而是空隙形状不匹配。" +
+                    "想再压下一张，可以试：允许 90° 旋转（薄板无纹向限制时最有效）、" +
+                    "把留边/间距调小、或在「方案对比」里换一个方案。",
                     thin.Count, string.Join("；", thin)));
             }
         }
@@ -388,7 +398,8 @@ namespace Nesting.Core.Solvers
 
         /// <summary>尝试把所有零件装进若干张板；有零件装不下则返回 null</summary>
         private static List<PackBin> Pack(List<PackItem> proto, List<SheetSpec> specs,
-                                          double spacing, double margin, PackHeuristic h, NestResult result)
+                                          double spacing, double margin, PackHeuristic h,
+                                          bool preferLarge, NestResult result)
         {
             var packer = new RectPacker(spacing);
             var bins = new List<PackBin>();
@@ -397,9 +408,20 @@ namespace Nesting.Core.Solvers
             var list = new List<PackItem>(proto.Count);
             foreach (PackItem it in proto) list.Add(it.Clone());
 
+            // 规格集合可能被 RestrictSheets 收窄，RequiredSpec 要按实际可用的板重算
             foreach (PackItem it in list)
             {
-                // 首次适配（First Fit）：依次尝试已开的板，用第一张放得下的
+                it.RequiredSpec = MinFittingSpec(it, specs, margin);
+                if (it.RequiredSpec == null) return null;   // 这件在这组规格里根本装不下
+            }
+
+            for (int idx = 0; idx < list.Count; idx++)
+            {
+                PackItem it = list[idx];
+
+                // 首次适配（First Fit）：依次尝试已开的板，用第一张放得下的。
+                // 新板只有"已开的全放不下"时才开，所以一张大板的空隙会先被小件填满，
+                // 填到真的塞不进任何一件，才开下一张 —— 这就是"大板要排满"。
                 PackBin target = null;
                 double bx = 0, by = 0;
                 bool brot = false;
@@ -414,16 +436,15 @@ namespace Nesting.Core.Solvers
                     }
                 }
 
-                // 放不下就开新板：选能容纳该件的最小规格
                 if (target == null)
                 {
-                    SheetSpec pick = null;
-                    foreach (SheetSpec s in specs)
-                    {
-                        if (!CanHold(s, it, margin)) continue;
-                        pick = s;
-                        break;
-                    }
+                    SheetSpec pick = ChooseNewSheet(list, idx, it, specs, margin, preferLarge);
+                    if (pick == null) return null;
+
+                    // 兜底：极端规格组合下"面积够大"不等于"装得下"（宽高比例不同），
+                    // 这时退回这件自己能用的小板，宁可多开一张也不让本次尝试失败
+                    if (!CanHold(pick, it, margin))
+                        pick = MinFittingSpec(it, specs, margin);
                     if (pick == null) return null;
 
                     var nb = new PackBin(pick.Width, pick.Height, pick.Name, margin);
@@ -436,6 +457,49 @@ namespace Nesting.Core.Solvers
             }
 
             return bins;
+        }
+
+        /// <summary>
+        /// 开新板时决定用哪种规格。
+        ///
+        /// 大板优先并不等于"每张都开最大的"。判断依据是**还没放下的件还需要多大的板**：
+        /// 只要剩余件里有一个 500x2500（只有 3050 装得下），这张就必须开 3050；
+        /// 等它被放掉、剩余件都能进 2440 了，后面就都开 2440。
+        /// 这样 3050 只出现在"非它不可"的场合，而且一旦开出就被小件填满。
+        ///
+        /// 关掉大板优先则是逐件贪心：只保证当前这件用能装下它的最小板。
+        /// </summary>
+        private static SheetSpec ChooseNewSheet(List<PackItem> list, int idx, PackItem it,
+                                                List<SheetSpec> specs, double margin, bool preferLarge)
+        {
+            if (!preferLarge) return MinFittingSpec(it, specs, margin);
+
+            SheetSpec pick = null;
+            double needArea = -1;
+            for (int k = idx; k < list.Count; k++)
+            {
+                SheetSpec s = list[k].RequiredSpec;
+                if (s == null) return null;
+
+                double a = s.Width * s.Height;
+                if (a > needArea + 1e-9) { needArea = a; pick = s; }
+            }
+            return pick;
+        }
+
+        /// <summary>在给定规格里找能容纳该件的最小规格（按面积）；都装不下返回 null</summary>
+        private static SheetSpec MinFittingSpec(PackItem it, List<SheetSpec> specs, double margin)
+        {
+            SheetSpec best = null;
+            double bestArea = double.MaxValue;
+            foreach (SheetSpec s in specs)
+            {
+                if (!CanHold(s, it, margin)) continue;
+
+                double a = s.Width * s.Height;
+                if (a < bestArea - 1e-9) { bestArea = a; best = s; }
+            }
+            return best;
         }
 
         /// <summary>板幅扣掉两侧留边后能否容纳该零件</summary>

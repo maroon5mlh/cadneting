@@ -46,8 +46,8 @@ namespace Nesting.AutoCAD.UI
                     _palette.Style = PaletteSetStyles.ShowPropertiesMenu
                                    | PaletteSetStyles.ShowAutoHideButton
                                    | PaletteSetStyles.ShowCloseButton;
-                    // 高度 740：多了「排除块」一行，另外结果表有 96px 的下限，
-                    // 面板再矮就会把结果表挤掉（那正是"下方一大片空白"的由来）
+                    // 高度 740：结果表要 96px（表头 + 3 行），面板再矮就会把它挤成
+                    // 一条缝（那正是"结果标题下大片空白"的由来）
                     _palette.MinimumSize = new Size(380, 740);
                     _palette.DockEnabled = DockSides.Left | DockSides.Right;
                     _palette.Add("排样", _control);

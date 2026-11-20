@@ -195,17 +195,6 @@ namespace Nesting.Core
         /// </summary>
         public bool SheetPreferLarge = true;
 
-        /// <summary>
-        /// 块名命中这些关键字的零件**不参与排样**。
-        ///
-        /// 用途：图里除了要切的零件，还常有折弯标记、压线、拉手孔位这类辅助块。
-        /// 它们尺寸不大但经常"一柱擎天"（例如 29x2075 的折弯标记），
-        /// 排样时只能占掉一整列高度，代价是整整一张板 —— 实测一批 26 件的料
-        /// 因为混进 3 个折弯标记块，从 4 张变成 5 张，最后一张只放了 2 件小料。
-        /// 这类块不该按面积参与装箱，交给人指定比让引擎猜安全。
-        /// </summary>
-        public List<string> ExcludeKeywords = new List<string>();
-
         /// <summary>优化目标：sheets=最少张数，cost=最低成本，area=最高利用率</summary>
         public string Objective = "sheets";
 
@@ -281,12 +270,6 @@ namespace Nesting.Core
 
         /// <summary>不影响出结果、但需要让用户知道的提示（异形件、近似处理等）</summary>
         public List<string> Warnings = new List<string>();
-
-        /// <summary>
-        /// 按「排除块」关键字跳过的品种：块名 → 件数。
-        /// 一定要报出来 —— 排样结果少了东西却无人知晓，比排得不好严重得多。
-        /// </summary>
-        public Dictionary<string, int> Excluded = new Dictionary<string, int>();
     }
 
     /// <summary>

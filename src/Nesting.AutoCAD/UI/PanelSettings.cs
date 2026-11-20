@@ -39,8 +39,6 @@ namespace Nesting.AutoCAD.UI
 
         public string Keywords = "";
 
-        /// <summary>排除块关键字（原始输入串，如「BEND_MARK、标记」）。留空 = 全部参与排样</summary>
-        public string ExcludeKeywords = "";
 
         /// <summary>最近一次读/写失败的原因，供 NESTDIAG 显示</summary>
         public static string LastError;

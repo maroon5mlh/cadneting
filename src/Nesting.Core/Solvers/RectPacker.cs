@@ -47,6 +47,14 @@ namespace Nesting.Core.Solvers
         public int BinIndex = -1;
 
         /// <summary>
+        /// 能容纳该件的最小规格板（按面积），null = 任何规格都装不下。
+        /// 开新板时由「剩余件里 RequiredSpec 最大的那一个」决定开哪种板：
+        /// 这样 3050 只在大件真的需要时才开，开了之后空隙由小件填满，
+        /// 而不是每件都各自开一张 3050。
+        /// </summary>
+        public SheetSpec RequiredSpec;
+
+        /// <summary>
         /// 深拷贝。每次排样尝试必须使用独立副本：
         /// 尝试之间会覆写 Px/Py/Rotated，共享对象会让「上一次的最优解」
         /// 在后续尝试中被悄悄改写，表现为不同零件落在同一坐标上。
@@ -62,7 +70,8 @@ namespace Nesting.Core.Solvers
                 H = H0,
                 W0 = W0,
                 H0 = H0,
-                CanRotate = CanRotate
+                CanRotate = CanRotate,
+                RequiredSpec = RequiredSpec
             };
         }
     }

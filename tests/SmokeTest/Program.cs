@@ -42,7 +42,7 @@ namespace SmokeTest
             TestMargin();
             TestKeywordRotation();
             TestTextHandles();
-            TestExcludeAndFreeArea();
+            TestFreeArea();
             TestPanelSettings();
             TestInsertOrigin();
 
@@ -447,9 +447,14 @@ namespace SmokeTest
             NestResult multi = NestEngine.Solve(Build(all));
             NestResult only = NestEngine.Solve(Build(new List<SheetSpec> { all[0] }));
 
-            Check("规格择优：三规格比只用 1220x2250 更少张数",
-                  multi.Sheets.Count < only.Sheets.Count,
+            // 这批料全是 1000x600，2250 就够。勾了三种规格也不该因此去开 2440/3050 ——
+            // "大板优先"只决定"需要多大的板"，不是"有大的就用大的"
+            Check("规格择优：三规格不多于只用 1220x2250",
+                  multi.Sheets.Count <= only.Sheets.Count,
                   multi.Sheets.Count + " 张 vs " + only.Sheets.Count + " 张");
+            Check("规格择优：没有超幅件就不占大板",
+                  !HasSheet(multi, "1220x2440") && !HasSheet(multi, "1220x3050"),
+                  SpecMixOf(multi));
             Check("规格择优：三规格全部落位", CountPlaced(multi) == 200,
                   CountPlaced(multi) + "/200 件");
 
@@ -510,80 +515,133 @@ namespace SmokeTest
         }
 
         // ------------------------------------------------------------------
-        // 大板优先：勾了多种规格时，先把大板排满，超幅/剩下的才用小板
+        // 规格选择：大板只在"非它不可"时开，且开出来必须被填满
         // ------------------------------------------------------------------
         private static void TestSheetPreferLarge()
         {
-            Console.WriteLine("\n-- 大板优先 --");
+            Console.WriteLine("\n-- 规格选择：大板只装非它不可的件 --");
 
-            // 小件 1000x600：2250 和 3050 都装得下；长件 1000x2400 只有 3050 装得下
-            NestJob Build(int longQty)
+            // 现场那类料：大件 500x2500 只有 3050 装得下（2440 扣留边后高 2430），
+            // 其余 100 件 300x2000 用 2440 就够。
+            // 期望：3050 只开 1 张装那个大件，空隙立刻被小件填满；
+            // 剩下的小件全部走 2440，而不是每件都各自开一张 3050。
+            NestJob Build(int smallQty, bool preferLarge)
             {
                 var job = new NestJob { BatchId = "LARGE", Unit = "mm" };
-                job.Sheets.Add(new SheetSpec { Name = "1220x2250", Width = 1220, Height = 2250 });
+                job.Sheets.Add(new SheetSpec { Name = "1220x2440", Width = 1220, Height = 2440 });
                 job.Sheets.Add(new SheetSpec { Name = "1220x3050", Width = 1220, Height = 3050 });
                 job.Settings.SpacingMm = 0;
                 job.Settings.MarginMm = 5;
                 job.Settings.AllowRotate90 = false;
+                job.Settings.SheetPreferLarge = preferLarge;
+                job.Settings.RotateKeywords = new List<string>();
 
-                var a = new PartType
+                var big = new PartType
                 {
-                    Id = "A", BlockName = "小件", Width = 1000, Height = 600,
-                    Quantity = 20, NetArea = 1000 * 600
+                    Id = "BIG", BlockName = "大件500x2500", Width = 500, Height = 2500,
+                    Quantity = 1, NetArea = 500 * 2500
                 };
-                a.Outer = Rect(0, 0, 1000, 600);
-                job.Parts.Add(a);
+                big.Outer = Rect(0, 0, 500, 2500);
+                job.Parts.Add(big);
 
-                if (longQty > 0)
+                if (smallQty > 0)
                 {
-                    var b = new PartType
+                    var s = new PartType
                     {
-                        Id = "B", BlockName = "长件", Width = 1000, Height = 2400,
-                        Quantity = longQty, NetArea = 1000 * 2400
+                        Id = "S", BlockName = "小件300x2000", Width = 300, Height = 2000,
+                        Quantity = smallQty, NetArea = 300 * 2000
                     };
-                    b.Outer = Rect(0, 0, 1000, 2400);
-                    job.Parts.Add(b);
+                    s.Outer = Rect(0, 0, 300, 2000);
+                    job.Parts.Add(s);
                 }
                 return job;
             }
 
-            // ---- 只用小件：两种策略的差异最干净 ----
-            NestJob largeOnly = Build(0);
-            largeOnly.Settings.SheetPreferLarge = true;
-            NestResult large = NestEngine.Solve(largeOnly);
+            NestResult mixed = NestEngine.Solve(Build(100, true));
 
-            NestJob smallOnly = Build(0);
-            smallOnly.Settings.SheetPreferLarge = false;
-            NestResult small = NestEngine.Solve(smallOnly);
+            int giant = 0, small = 0;
+            foreach (SheetResult s in mixed.Sheets)
+                if (s.SheetName == "1220x3050") giant++; else small++;
+            Check("大板只开非它不可的那张", giant == 1, giant + " 张 3050");
+            Check("大板立刻被小件填满", mixed.Sheets[0].Items.Count >= 3,
+                  mixed.Sheets[0].Items.Count + " 件（大件 + 填满空隙的小件）");
+            Check("剩料改走 2440", small == 25, small + " 张 2440");
+            Check("全部件都落位", CountPlaced(mixed) == 101, CountPlaced(mixed) + "/101 件");
+            Check("大板利用率不低于 60%", mixed.Sheets[0].BboxCoverage >= 0.60,
+                  mixed.Sheets[0].BboxCoverage.ToString("P1"));
 
-            Check("大板优先：小件也先上大板", AllSheetsAre(large, "1220x3050"), SpecMixOf(large));
-            Check("小板优先：装得下就不占大板", AllSheetsAre(small, "1220x2250"), SpecMixOf(small));
-            Check("两种策略零件都落位",
-                  CountPlaced(large) == 20 && CountPlaced(small) == 20,
-                  CountPlaced(large) + " / " + CountPlaced(small) + " 件");
-            Check("大板优先张数更少", large.Sheets.Count < small.Sheets.Count,
-                  large.Sheets.Count + " 张 vs " + small.Sheets.Count + " 张");
+            // 没有任何超幅件时，大板一张都不该开 —— 这是"大板优先"最容易跑偏的地方：
+            // 它只该决定"需要多大的板"，不该让能进小板的件去占大板
+            // 一批纯小件：都在小板能力范围内
+            var pure = new NestJob { BatchId = "PURE", Unit = "mm" };
+            pure.Sheets.Add(new SheetSpec { Name = "1220x2250", Width = 1220, Height = 2250 });
+            pure.Sheets.Add(new SheetSpec { Name = "1220x3050", Width = 1220, Height = 3050 });
+            pure.Settings.SpacingMm = 0;
+            pure.Settings.MarginMm = 5;
+            pure.Settings.AllowRotate90 = false;
+            pure.Settings.SheetPreferLarge = true;
+            pure.Settings.RotateKeywords = new List<string>();
+            var p1 = new PartType
+            {
+                Id = "P", BlockName = "小件1000x600", Width = 1000, Height = 600,
+                Quantity = 20, NetArea = 1000 * 600
+            };
+            p1.Outer = Rect(0, 0, 1000, 600);
+            pure.Parts.Add(p1);
 
-            // ---- 混进超幅件：只能进 3050，剩下的小件仍按自身尺寸走 ----
-            NestJob mixed = Build(2);
-            mixed.Settings.SheetPreferLarge = true;
-            NestResult mixedLarge = NestEngine.Solve(mixed);
+            NestResult pureSmall = NestEngine.Solve(pure);
+            Check("没有超幅件就不开大板", !HasSheet(pureSmall, "1220x3050"), SpecMixOf(pureSmall));
+            Check("纯小件全部落位", CountPlaced(pureSmall) == 20, CountPlaced(pureSmall) + "/20 件");
 
-            NestJob mixedSmall = Build(2);
-            mixedSmall.Settings.SheetPreferLarge = false;
-            NestResult mixedSmallRes = NestEngine.Solve(mixedSmall);
+            // 超幅件 1000x2500：2440 和 2250 都装不下，两种策略都必须落到 3050
+            var tall = new NestJob { BatchId = "TALL", Unit = "mm" };
+            tall.Sheets.Add(new SheetSpec { Name = "1220x2440", Width = 1220, Height = 2440 });
+            tall.Sheets.Add(new SheetSpec { Name = "1220x3050", Width = 1220, Height = 3050 });
+            tall.Settings.SpacingMm = 0;
+            tall.Settings.MarginMm = 5;
+            tall.Settings.AllowRotate90 = false;
+            tall.Settings.RotateKeywords = new List<string>();
 
-            Check("超幅件两种策略下都只能用 3050",
-                  HasSheet(mixedLarge, "1220x3050") && HasSheet(mixedSmallRes, "1220x3050"),
-                  SpecMixOf(mixedLarge) + "｜" + SpecMixOf(mixedSmallRes));
-            Check("混排零件全部落位",
-                  CountPlaced(mixedLarge) == 22 && CountPlaced(mixedSmallRes) == 22,
-                  CountPlaced(mixedLarge) + " / " + CountPlaced(mixedSmallRes) + " 件");
+            var t1 = new PartType
+            {
+                Id = "T", BlockName = "超幅1000x2500", Width = 1000, Height = 2500,
+                Quantity = 2, NetArea = 1000 * 2500
+            };
+            t1.Outer = Rect(0, 0, 1000, 2500);
+            tall.Parts.Add(t1);
 
-            Console.WriteLine("    纯小件：大板优先 " + SpecMixOf(large) + "，小板优先 " + SpecMixOf(small));
-            Console.WriteLine("    含超幅件：大板优先 " + SpecMixOf(mixedLarge) +
-                              "，小板优先 " + SpecMixOf(mixedSmallRes));
+            foreach (bool prefer in new[] { true, false })
+            {
+                tall.Settings.SheetPreferLarge = prefer;
+                NestResult tr = NestEngine.Solve(tall);
+                Check("超幅件两种策略都只能用 3050" + (prefer ? "（大板优先）" : "（小板优先）"),
+                      HasSheet(tr, "1220x3050") && !HasSheet(tr, "1220x2440"), SpecMixOf(tr));
+            }
+
+            // 比所有板都宽的件：必须直接说清是哪件、差多少，而不是笼统"排不出来"
+            var tooBig = new NestJob { BatchId = "BIGPART", Unit = "mm" };
+            tooBig.Sheets.Add(new SheetSpec { Name = "1220x3050", Width = 1220, Height = 3050 });
+            tooBig.Settings.MarginMm = 5;
+            var w1 = new PartType
+            {
+                Id = "W", BlockName = "超宽件1500x1000", Width = 1500, Height = 1000,
+                Quantity = 1, NetArea = 1500 * 1000
+            };
+            w1.Outer = Rect(0, 0, 1500, 1000);
+            tooBig.Parts.Add(w1);
+
+            NestResult bad = NestEngine.Solve(tooBig);
+            Check("超幅件报错带件名", bad.Error != null && bad.Error.Contains("超宽件1500x1000"),
+                  bad.Error ?? "(没有报错)");
+            Check("超幅件报错带缺口尺寸", bad.Error != null && bad.Error.Contains("1210"),
+                  bad.Error ?? "");
+
+            Console.WriteLine("    500x2500 + 100x(300x2000)：" + SpecMixOf(mixed) +
+                              "，首张 " + mixed.Sheets[0].Items.Count + " 件 " +
+                              mixed.Sheets[0].BboxCoverage.ToString("P1"));
+            Console.WriteLine("    纯小件（2250+3050）：" + SpecMixOf(pureSmall));
         }
+
 
         // ------------------------------------------------------------------
         // 方案对比：多个候选必须各自成立、互有区别、推荐项可信
@@ -1018,62 +1076,43 @@ namespace SmokeTest
         // 面板参数持久化
         // ------------------------------------------------------------------
         // ------------------------------------------------------------------
-        // 排除辅助块 + 每张板余料
+        // 每张板的余料统计与提示
         //
-        // 现场问题：图里混着折弯标记块（29x2075 这种又细又长的），
-        // 面积很小但装箱时必须占掉一整列高度，实测能把 4 张板的料顶成 5 张，
-        // 而多出来的那张板上只放得下两件小料 —— 用户看到的就是"板没排满就换下一张"。
+        // 余料口径：板面积 − 零件包围盒。它回答的是"这块板还剩多大空地"，
+        // 和按净面积算的利用率不是一回事（异形件的凹陷不算浪费）。
         // ------------------------------------------------------------------
-        private static void TestExcludeAndFreeArea()
+        private static void TestFreeArea()
         {
-            Console.WriteLine("\n-- 排除辅助块 / 余料 --");
+            Console.WriteLine("\n-- 余料统计 --");
 
-            NestJob Build(bool exclude)
+            var job = new NestJob { BatchId = "FREE", Unit = "mm" };
+            job.Sheets.Add(new SheetSpec { Name = "1000x2000", Width = 1000, Height = 2000 });
+            job.Settings.SpacingMm = 0;
+            job.Settings.MarginMm = 0;
+            job.Settings.AllowRotate90 = false;
+
+            var a = new PartType
             {
-                var job = new NestJob { BatchId = "EXCL", Unit = "mm" };
-                job.Sheets.Add(new SheetSpec { Name = "1000x2000", Width = 1000, Height = 2000 });
-                job.Settings.SpacingMm = 0;
-                job.Settings.MarginMm = 0;
-                job.Settings.AllowRotate90 = false;
+                Id = "A", BlockName = "面板", Width = 500, Height = 500,
+                Quantity = 4, NetArea = 250000
+            };
+            a.Outer = Rect(0, 0, 500, 500);
 
-                var a = new PartType
-                {
-                    Id = "A", BlockName = "面板", Width = 500, Height = 500,
-                    Quantity = 4, NetArea = 250000
-                };
-                a.Outer = Rect(0, 0, 500, 500);
+            // 折弯标记：又细又长，面积只有 38,000，装箱却要一整列高度。
+            // 这类块同样参与排样，引擎不做任何按块名的筛选。
+            var mark = new PartType
+            {
+                Id = "M", BlockName = "BEND_MARK_BLOCK_1", Width = 20, Height = 1900,
+                Quantity = 1, NetArea = 38000
+            };
+            mark.Outer = Rect(0, 0, 20, 1900);
 
-                // 折弯标记：又细又长，面积 38,000，装箱却要一整列
-                var mark = new PartType
-                {
-                    Id = "M", BlockName = "BEND_MARK_BLOCK_1", Width = 20, Height = 1900,
-                    Quantity = 1, NetArea = 38000
-                };
-                mark.Outer = Rect(0, 0, 20, 1900);
+            job.Parts.Add(a);
+            job.Parts.Add(mark);
 
-                job.Parts.Add(a);
-                job.Parts.Add(mark);
-                if (exclude) job.Settings.ExcludeKeywords = new List<string> { "BEND_MARK" };
-                return job;
-            }
+            NestResult withMark = NestEngine.Solve(job);
 
-            NestResult withMark = NestEngine.Solve(Build(false));
-            NestResult excluded = NestEngine.Solve(Build(true));
-
-            Check("不排除：标记块参与排样", CountPlaced(withMark) == 5, CountPlaced(withMark) + "/5 件");
-            Check("不排除：没有排除记录", withMark.Excluded.Count == 0, withMark.Excluded.Count + " 条");
-
-            Check("排除：标记块不参与", CountPlaced(excluded) == 4, CountPlaced(excluded) + "/4 件");
-            Check("排除：记录被跳过的块", excluded.Excluded.Count == 1,
-                  string.Join("、", excluded.Excluded.Keys));
-            Check("排除：跳过件数正确",
-                  excluded.Excluded.Count == 1 && excluded.Excluded.ContainsValue(1),
-                  excluded.Excluded.Count == 1 ? excluded.Excluded["BEND_MARK_BLOCK_1"].ToString() : "-");
-
-            bool told = false;
-            foreach (string w in excluded.Warnings)
-                if (w.Contains("排除块") && w.Contains("BEND_MARK")) { told = true; break; }
-            Check("排除：结果里明说跳过了谁", told, "");
+            Check("又细又长的块也照样参与排样", CountPlaced(withMark) == 5, CountPlaced(withMark) + "/5 件");
 
             // 余料：500x500 x4 铺满 1000x2000 的一半
             SheetResult s0 = withMark.Sheets[0];
@@ -1125,8 +1164,8 @@ namespace SmokeTest
                   (p0.RotationDeg == 90) == (Math.Abs(w2 - tall.Height) < 1e-6),
                   "rot " + p0.RotationDeg);
 
-            Console.WriteLine("    不排除 " + withMark.Sheets.Count + " 张 / 排除后 " +
-                              excluded.Sheets.Count + " 张；余料 " + (s0.FreeArea / 1e6).ToString("F2") + " m²");
+            Console.WriteLine("    " + withMark.Sheets.Count + " 张；余料 " +
+                              (s0.FreeArea / 1e6).ToString("F2") + " m²");
         }
 
         private static void TestPanelSettings()
@@ -1155,8 +1194,7 @@ namespace SmokeTest
                     AllowRotate90 = false,
                     FollowText = true,
                     SheetPreferLarge = false,   // 关掉也要能原样存回来
-                    Keywords = "铰包边、中横板",
-                    ExcludeKeywords = "BEND_MARK、标记"
+                    Keywords = "铰包边、中横板"
                 };
                 custom.Sheets.Add(new PanelSheetRow { Use = true, Name = "1220x2250", W = 1220, H = 2250 });
                 custom.Sheets.Add(new PanelSheetRow { Use = false, Name = "停用规格", W = 900, H = 1800 });
@@ -1176,8 +1214,6 @@ namespace SmokeTest
                           back.Sheets.Count == 2 && !back.Sheets[1].Use,
                           back.Sheets.Count == 2 ? back.Sheets[1].Use.ToString() : "-");
                     Check("往返：中文关键字不乱码", back.Keywords == "铰包边、中横板", back.Keywords ?? "");
-                    Check("往返：排除块关键字", back.ExcludeKeywords == "BEND_MARK、标记",
-                          back.ExcludeKeywords ?? "");
                 }
 
                 // 损坏文件必须退化成默认值，而不是抛异常把面板干掉

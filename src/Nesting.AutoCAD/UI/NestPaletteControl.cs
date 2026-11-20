@@ -24,7 +24,6 @@ namespace Nesting.AutoCAD.UI
         public CheckBox FollowText;
         public CheckBox PreferLargeCheck;
         public TextBox KeywordBox;
-        public TextBox ExcludeBox;
         public Button RunButton;
         public DataGridView PlanGrid;
         public Button ApplyPlanButton;
@@ -136,7 +135,7 @@ namespace Nesting.AutoCAD.UI
             {
                 Dock = DockStyle.Fill,
                 ColumnCount = 2,
-                RowCount = 5,
+                RowCount = 4,
                 AutoSize = true,
                 AutoSizeMode = AutoSizeMode.GrowAndShrink,
                 Margin = new Padding(0, 2, 0, 8)
@@ -234,9 +233,9 @@ namespace Nesting.AutoCAD.UI
             paramGrid.Controls.Add(RotateCheck, 0, 1);
             paramGrid.Controls.Add(FollowText, 1, 1);
 
-            // 大板优先：勾了多种规格时的用板顺序。
-            // 默认开：开料习惯是先切整张大板，剩下的超幅件才用小板；
-            // 关掉换成"能装下的最小板"，用料面积更省但张数更多。
+            // 大板优先：勾了多种规格时的用板策略。
+            // 默认开：只有小板放不下的件才开大板，开出来立刻用小件把空隙填满。
+            // 关掉换成"逐件用能装下它的最小板"（贪心，有时会多出几张板）。
             PreferLargeCheck = new CheckBox
             {
                 Text = "大板优先",
@@ -247,13 +246,14 @@ namespace Nesting.AutoCAD.UI
             if (_tip != null)
             {
                 _tip.SetToolTip(PreferLargeCheck,
-                    "勾选多种规格时的开板顺序。\n" +
-                    "开：先把大板排满，剩下的（超幅）件再用小板。\n" +
-                    "关：能进小板的件就用小板，用料面积更省。");
+                    "勾选多种规格时怎么用板。\n" +
+                    "开：只有小板放不下的件才开大板，这张板剩下的空隙立刻用小件填满；\n" +
+                    "     等剩余件都能进小板了，后面就改用小板。\n" +
+                    "关：每一件都用能装下它的最小板（逐件贪心）。");
             }
             var preferHint = new Label
             {
-                Text = "先排满大板",
+                Text = "只装非它不可的件",
                 AutoSize = true,
                 ForeColor = SystemColors.GrayText,
                 Margin = new Padding(0, 8, 0, 0)
@@ -279,29 +279,6 @@ namespace Nesting.AutoCAD.UI
 
             paramGrid.Controls.Add(kwLabel, 0, 3);
             paramGrid.Controls.Add(KeywordBox, 1, 3);
-
-            // 排除块：折弯标记 / 压线 / 孔位标记这类辅助块不该参与装箱。
-            // 它们面积很小，但装箱时要占掉一整列高度，一个 29x2075 的标记
-            // 就能把 4 张板的料顶成 5 张 —— 这个框是给这种块留的出口。
-            var exLabel = new Label
-            {
-                Text = "排除块",
-                AutoSize = true,
-                Margin = new Padding(0, 8, 4, 0)
-            };
-            ExcludeBox = new TextBox
-            {
-                Text = "",
-                Dock = DockStyle.Fill,
-                Margin = new Padding(0, 5, 0, 0)
-            };
-            _tip.SetToolTip(ExcludeBox,
-                "块名包含这些字的块不参与排样，也不会被移动。\n" +
-                "用来排除折弯标记、压线、孔位标记这类辅助块（例如填 BEND_MARK）。\n" +
-                "留空 = 全部参与；用顿号、逗号或空格分隔多个关键字。");
-
-            paramGrid.Controls.Add(exLabel, 0, 4);
-            paramGrid.Controls.Add(ExcludeBox, 1, 4);
 
             // ---- 主按钮 ----
             RunButton = new Button
@@ -494,7 +471,6 @@ namespace Nesting.AutoCAD.UI
             FollowText.CheckedChanged += OnAnySettingChanged;
             PreferLargeCheck.CheckedChanged += OnAnySettingChanged;
             KeywordBox.Leave += OnAnySettingChanged;
-            ExcludeBox.Leave += OnAnySettingChanged;
 
             // 勾选框必须显式提交，否则 CellValueChanged 要等离开单元格才触发，
             // 用户勾完直接关 CAD 就会丢
@@ -531,8 +507,7 @@ namespace Nesting.AutoCAD.UI
                 AllowRotate90 = RotateCheck.Checked,
                 FollowText = FollowText.Checked,
                 SheetPreferLarge = PreferLargeCheck.Checked,
-                Keywords = KeywordBox.Text ?? "",
-                ExcludeKeywords = ExcludeBox.Text ?? ""
+                Keywords = KeywordBox.Text ?? ""
             };
 
             foreach (DataGridViewRow row in SheetGrid.Rows)
@@ -586,7 +561,6 @@ namespace Nesting.AutoCAD.UI
                 PreferLargeCheck.Checked = saved.SheetPreferLarge;
 
                 if (!string.IsNullOrWhiteSpace(saved.Keywords)) KeywordBox.Text = saved.Keywords;
-                if (!string.IsNullOrWhiteSpace(saved.ExcludeKeywords)) ExcludeBox.Text = saved.ExcludeKeywords;
             }
             finally
             {
@@ -648,9 +622,6 @@ namespace Nesting.AutoCAD.UI
             // 面板清空 = 用回默认关键字。这里不做"空表示一个都不强制"：
             // 那样用户误删一行就会静默丢掉几个点的利用率，很难联想到原因。
             if (words.Count > 0) st.RotateKeywords = words;
-
-            // 排除块是反过来的：留空就是"一个都不排除"，这是默认状态
-            st.ExcludeKeywords = SplitWords(ExcludeBox.Text);
 
             return st;
         }
